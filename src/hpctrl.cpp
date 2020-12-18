@@ -404,6 +404,7 @@ int connect()
         FALSE,      // release_system_control
         -1,          // max_read_buffer_len
         FALSE);     // Disable Prologix auto-read mode at startup
+    
     GPIB_set_EOS_mode(10);
     GPIB_set_serial_read_dropout(10000);
     instrument_setup();
@@ -706,6 +707,7 @@ void getstate(int include_cal)
     if (!connected)
     {
         printf("!not connected\n");
+        fflush(stdout);
         return;
     }
     
@@ -733,12 +735,14 @@ void getstate(int include_cal)
     if (actual != 2)
     {
         printf("Error: OUTPLEAS header query returned %d bytes", actual);
+        fflush(stdout);
         return;
     }
 
     if ((data[0] != '#') || (data[1] != 'A'))
     {
         printf("Error: OUTPLEAS FORM1 block header was 0x%.2X 0x%.2X", data[0], data[1]);
+        fflush(stdout);
         return;
     }
 
@@ -783,6 +787,7 @@ void getstate(int include_cal)
         if ((i % 40 == 39) && (i < learn_string_size - 1)) printf("\n");
     }
     printf("\n");
+    fflush(stdout);
 
     //
     // Store calibration data
@@ -1010,6 +1015,7 @@ void getstate(int include_cal)
                     if (len != array_bytes)
                     {
                         printf("Error: OUTPCALC returned %d bytes, expected %d", len, array_bytes);
+                        fflush(stdout);
                         return;
                     }
 
@@ -1022,6 +1028,7 @@ void getstate(int include_cal)
                     if (actual != array_bytes)
                     {
                         printf("Error: OUTPCALC%d%d returned %d bytes, expected %d", (j + 1) / 10, (j + 1) % 10, actual, array_bytes);
+                        fflush(stdout);
                         return;
                     }
 
@@ -1053,6 +1060,7 @@ void setstate(int include_cal)
     if (!connected)
     {
         printf("!not connected\n");
+        fflush(stdout);
         return;
     }
     int val, val2;
@@ -1064,6 +1072,7 @@ void setstate(int include_cal)
     if ((header[0] != '#') || (header[1] != 'A'))
     {
         printf("!setstate: header does not match\n");
+        fflush(stdout);
         return;
     }
     scanf("%02x%02x\n", &val, &val2);
@@ -1081,13 +1090,14 @@ void setstate(int include_cal)
         if (scanf("%02x", &val) != 1)
         {
             printf("!setstate: state data broken\n");
+            fflush(stdout);
             return;
         }
         data[i + 19] = (uint8_t)val;
         //if ((i % 40 == 39) && (i < length - 1)) scanf("\n");
     }
     //scanf("\n");
-    printf("!going to send...\n");
+    //printf("!going to send...\n");
         
     GPIB_write_BIN(data, length + 19);    
     Sleep(1500);
@@ -1147,6 +1157,7 @@ void reset()
     if (!connected)
     {
         printf("!not connected\n");
+        fflush(stdout);
         return;
     }
     GPIB_puts("PRES;");
@@ -1157,6 +1168,7 @@ void factory_reset()
     if (!connected)
     {
         printf("!not connected\n");
+        fflush(stdout);
         return;
     }
     if (!is_8510())
@@ -1189,6 +1201,7 @@ void direct_command()
     if (!connected)
     {
         printf("!not connected\n");
+        fflush(stdout);
         return;
     }
 
@@ -1233,7 +1246,11 @@ void direct_command()
     case action_cmd_read_bin:
         data = (uint8_t*)GPIB_read_BIN();
         if ((data[0] != '#') || (data[1] != 'A'))
+        {
             printf("!header not received\n");
+            fflush(stdout);
+            break;
+        }
         len = (data[2] << 8) + data[3];
         for (int i = 0; i < len + 4; i++)
             printf("%02x", data[i]);
@@ -1346,7 +1363,11 @@ void set_sending_format(char f)
 {
     if (f == '1') current_sending_format = form1;
     else if (f == '4') current_sending_format = form4;
-    else printf("!unsupported format %c", f);
+    else
+    {
+        printf("!unsupported format %c", f);
+        fflush(stdout);
+    }
 }
 
 DWORD WINAPI interactive_thread(LPVOID arg)
@@ -1436,6 +1457,7 @@ DWORD WINAPI interactive_thread(LPVOID arg)
     if (connected)
     {
         printf("!auto disconnect before exit\n");
+        fflush(stdout);
         if (ready_to_receive_command) disconnect();
     }
     exit(0);
@@ -1453,6 +1475,7 @@ void create_event_and_thread()
     if (action_event == NULL)
     {
         printf("CreateEvent failed (%d)\n", GetLastError());
+        fflush(stdout);
         exit(1);
     }
 
@@ -1466,6 +1489,7 @@ void create_event_and_thread()
     if (end_of_input_event == NULL)
     {
         printf("CreateEvent failed (%d)\n", GetLastError());
+        fflush(stdout);
         exit(1);
     }
 
@@ -1480,6 +1504,7 @@ void create_event_and_thread()
     if (t == NULL)
     {
         printf("CreateThread failed (%d)\n", GetLastError());
+        fflush(stdout);
         exit(1);
     }
 }
@@ -1495,6 +1520,7 @@ void main_action_loop()
         if (event != WAIT_OBJECT_0)
         {
             printf("Wait error (%d)\n", GetLastError());
+            fflush(stdout);
             exit(1);
         }
 
@@ -1512,6 +1538,7 @@ void main_action_loop()
             if (!SetEvent(end_of_input_event))
             {
                 printf("SetEvent failed (%d)\n", GetLastError());
+                fflush(stdout);
                 exit(1);
             }
             break;
@@ -1521,6 +1548,7 @@ void main_action_loop()
             if (!SetEvent(end_of_input_event))
             {
                 printf("SetEvent failed (%d)\n", GetLastError());
+                fflush(stdout);
                 exit(1);
             }
             break;
@@ -1559,8 +1587,8 @@ const char* test2argv[] = { "hpctrl", "-a", "19", "-i" };
 int test1argc = 7;
 int test2argc = 4;
 
-//int runtest = 2;
-int runtest = 0;
+int runtest = 2;
+//int runtest = 0;
 
 int main(int argc, char** argv)
 {
