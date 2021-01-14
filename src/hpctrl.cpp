@@ -54,6 +54,7 @@ static freq_format current_freq_format = ghz;
 enum input_mode { mode_menu, mode_cmd, mode_input_blocked };
 
 static volatile input_mode current_input_mode = mode_menu;
+static volatile int new_input_entered;
 
 static char ln[52];
 
@@ -1240,6 +1241,8 @@ void direct_command(action_type requested_action, const char *string_to_send)
         return;
     }
 
+    new_input_entered = 0;
+
     switch (requested_action)
     {
     case action_cmd_puts:
@@ -1264,9 +1267,10 @@ void direct_command(action_type requested_action, const char *string_to_send)
             {
                 printf("%s", data);
                 fflush(stdout);
+                log_session("arrived new read_ASC", (const char *)data);
             }
             else Sleep(1);
-        } while (action == action_cmd_continuous_asc);
+        } while (!new_input_entered);
         break;
     case action_cmd_repeated_asc:
         for (int i = 0; i < cmd_read_repeat_count; i++)
@@ -1438,6 +1442,8 @@ DWORD WINAPI interactive_thread(LPVOID arg)
         sprintf(loooog, "'%s', len=%d, stricmp:%d", ln, strlen(ln), _stricmp("CMD", ln));
         log_session("! processing input line: '", loooog);
 		
+        new_input_entered = 1;
+
         if (current_input_mode == mode_menu)
         { 
             if (_stricmp(ln, "HELP") == 0) help();
@@ -1448,7 +1454,7 @@ DWORD WINAPI interactive_thread(LPVOID arg)
             else if (_strnicmp(ln, "CONNECT", 7) == 0)
             {
                 action = action_connect;
-                if ((ln[8] >= '0') && (ln[8] <= '9'))
+                if ((strlen(ln) > 7) && (ln[8] >= '0') && (ln[8] <= '9'))
                     sscanf(ln + 8, "%d", &cmdline_a);
             }
             else if (_stricmp(ln, "DISCONNECT") == 0) action = action_disconnect;
@@ -1639,7 +1645,7 @@ void interactive()
 }
 
 const char* test1argv[] = { "hpctrl", "-a", "16", "-s11", "-s12", "-s21", "-s22" };
-const char* test2argv[] = { "hpctrl", "-a", "16", "-i" };
+const char* test2argv[] = { "hpctrl", "-a", "19", "-i" };
 
 int test1argc = 7;
 int test2argc = 4;
