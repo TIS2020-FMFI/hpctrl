@@ -63,11 +63,13 @@ static char ln[52];
 enum action_type {
     action_none, action_connect, action_disconnect, action_sweep, action_getstate, action_setstate,
     action_getcalib, action_setcalib, action_cmd_puts, action_cmd_query, action_cmd_status, action_cmd_read_asc,
-    action_cmd_continuous_asc, action_cmd_repeated_asc, action_cmd_read_bin, action_exit, action_reset, action_freset
+    action_cmd_continuous_asc, action_cmd_repeated_asc, action_cmd_read_bin, action_exit, action_reset, action_freset,
+    action_s11, action_s12, action_s21, action_s22, action_all, action_clear, action_form, action_fmt, action_freq,
+    action_file, action_autosweep
 };
 
 static action_type action_queue[ACTION_QUEUE_SIZE];
-static char* action_argument[ACTION_QUEUE_SIZE];
+static char* action_arguments[ACTION_QUEUE_SIZE];
 static int aq_wp, aq_rp;
 static HANDLE aq_lock;
 
@@ -75,7 +77,7 @@ static volatile action_type action;
 static int cmd_read_repeat_count;
 
 
-HANDLE action_event, end_of_input_event;
+HANDLE action_event;
 
 
 void WINAPI GPIB_error(C8* msg, S32 ibsta, S32 iberr, S32 ibcntl)
@@ -1227,7 +1229,7 @@ void factory_reset()
     }
 }
 
-void direct_command(action_type requested_action, const char *string_to_send)
+void direct_command(action_type requested_action, const char *action_argument)
 {
     // s string   - send string using gpib_puts()
     // q query    - send string using gpib_query() and print result
@@ -1254,11 +1256,11 @@ void direct_command(action_type requested_action, const char *string_to_send)
     {
     case action_cmd_puts:
         //DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
-	    log_session("! GPIB_puts: '", string_to_send);
-        GPIB_puts(string_to_send);
+	    log_session("! GPIB_puts: '", action_argument);
+        GPIB_puts(action_argument);
         break;
     case action_cmd_query:
-        response = GPIB_query(string_to_send);
+        response = GPIB_query(action_argument);
         printf("%s", response);
         fflush(stdout);
         break;
@@ -1280,6 +1282,8 @@ void direct_command(action_type requested_action, const char *string_to_send)
         } while (!new_input_entered);
         break;
     case action_cmd_repeated_asc:
+        sscanf(action_argument, "%d", &cmd_read_repeat_count);
+
         for (int i = 0; i < cmd_read_repeat_count; i++)
         {
             data = (uint8_t*)GPIB_read_ASC();
@@ -1418,105 +1422,165 @@ void set_sending_format(char f)
     }
 }
 
+//ready_to_receive_command = 0;
+void perform_action(action_type action, char *action_argument)
+{
+    switch (action)
+    {
+    case action_connect: connect(); break;
+    case action_disconnect: disconnect(); break;
+    case action_s11: cmdline_s11 = 1; break;
+    case action_s12: cmdline_s12 = 1; break;
+    case action_s21: cmdline_s21 = 1; break;
+    case action_s22: cmdline_s22 = 1; break;
+    case action_all: cmdline_s11 = cmdline_s21 = cmdline_s12 = cmdline_s22 = 1; break;
+    case action_clear: cmdline_s11 = cmdline_s21 = cmdline_s12 = cmdline_s22 = 0; break;
+    case action_form: set_sending_format(action_argument[0]); break;
+    case action_fmt: set_format(action_argument); break;
+    case action_freq: set_freq_format(action_argument); break;
+    case action_file: set_file(); break;
+    case action_sweep: sweep(); break;
+    case action_autosweep: autosweep = 1; sweep(); break;
+    case action_getstate: getstate(); break;
+    case action_setstate: setstate(); current_input_mode = mode_menu; break;
+    case action_getcalib: getcalib(); break;
+    case action_setcalib: setcalib(); current_input_mode = mode_menu; break;
+    case action_cmd_puts:
+    case action_cmd_status:
+    case action_cmd_query:
+    case action_cmd_read_asc:
+    case action_cmd_continuous_asc:
+    case action_cmd_repeated_asc:
+    case action_cmd_read_bin:
+        direct_command(action, action_argument);
+        break;
+    case action_reset: reset(); break;
+    case action_freset: factory_reset(); break;
+    }
+    if (action_argument) free(action_argument);
+}
+
+// mutex already locked when dequeue_action called
+action_type dequeue_action(char** action_argument)
+{
+    *action_argument = 0;
+    if (aq_rp == aq_wp) return action_none;
+    action_type at = action_queue[aq_rp];
+    *action_argument = action_arguments[aq_rp];
+    aq_rp = (aq_rp + 1) % ACTION_QUEUE_SIZE;
+    return at;
+}
+
+void enqueue_action(action_type action, char* action_argument)
+{
+    char* aa = 0;
+    if (action_argument)
+    {
+        aa = (char*)malloc(strlen(action_argument) + 1);
+        strcpy(aa, action_argument);
+    }
+
+    DWORD dwWaitResult = WaitForSingleObject(aq_lock, INFINITE);
+    if (dwWaitResult != WAIT_OBJECT_0) return;
+
+    action_queue[aq_wp] = action;
+    action_arguments[aq_wp] = aa;
+    if (aq_wp == aq_rp) 
+      if (!SetEvent(action_event))
+      {
+          printf("SetEvent failed (%d)\n", GetLastError());
+          exit(1);
+      }
+    aq_wp = (aq_wp + 1) % ACTION_QUEUE_SIZE;
+    if (aq_wp == aq_rp)
+    {
+        printf("The capacity of action queue (%d) was exahusted\n", ACTION_QUEUE_SIZE);
+        exit(1);
+    }
+    ReleaseMutex(aq_lock);
+}
+
+void parse_end_enqueue_cmd_action(char* ln)
+{
+    if (ln[0] == '.') current_input_mode = mode_menu;
+    else if ((ln[0] == 's') && (strlen(ln) > 2)) enqueue_action(action_cmd_puts, ln + 2);
+    else if ((ln[0] == 'q') && (strlen(ln) > 2)) enqueue_action(action_cmd_query, ln + 2);
+    else if (ln[0] == 'a') enqueue_action(action_cmd_read_asc, ln + 2);
+    else if (ln[0] == 'c') enqueue_action(action_cmd_continuous_asc, ln + 2);
+    else if (ln[0] == 'd') enqueue_action(action_cmd_repeated_asc, ln + 2);
+    else if (ln[0] == 'b') enqueue_action(action_cmd_read_bin, 0); 
+    else if (ln[0] == '?') enqueue_action(action_cmd_status, 0);
+}
+
+void parse_end_enqueue_menu_action(char* ln)
+{
+    if (_strnicmp(ln, "CONNECT", 7) == 0)
+    {
+        if ((strlen(ln) > 7) && (ln[8] >= '0') && (ln[8] <= '9'))
+            enqueue_action(action_connect, ln + 8);
+        else enqueue_action(action_connect, 0);
+    }
+    else if (_stricmp(ln, "DISCONNECT") == 0) enqueue_action(action_disconnect, 0);
+    else if (_stricmp(ln, "S11") == 0) enqueue_action(action_s11, 0);
+    else if (_stricmp(ln, "S21") == 0) enqueue_action(action_s21, 0);
+    else if (_stricmp(ln, "S12") == 0) enqueue_action(action_s12, 0);
+    else if (_stricmp(ln, "S22") == 0) enqueue_action(action_s22, 0);
+    else if (_stricmp(ln, "ALL") == 0) enqueue_action(action_all, 0);
+    else if (_stricmp(ln, "CLEAR") == 0) enqueue_action(action_clear, 0);
+    else if (_strnicmp(ln, "FORM", 4) == 0) enqueue_action(action_form, ln + 4);
+    else if (_strnicmp(ln, "FMT", 3) == 0) enqueue_action(action_fmt, ln);
+    else if (_strnicmp(ln, "FREQ", 4) == 0) enqueue_action(action_freq, ln);
+    else if (_strnicmp(ln, "FILE", 4) == 0) enqueue_action(action_file, ln);
+    else if (_stricmp(ln, "MEASURE") == 0) enqueue_action(action_sweep, 0);
+    else if (_stricmp(ln, "M+") == 0) enqueue_action(action_autosweep, 0);
+    else if (_stricmp(ln, "GETSTATE") == 0) enqueue_action(action_getstate, 0);
+    else if (_stricmp(ln, "SETSTATE") == 0)
+    {
+        current_input_mode = mode_input_blocked;
+        enqueue_action(action_setstate, 0);
+    }
+    else if (_stricmp(ln, "GETCALIB") == 0) enqueue_action(action_getcalib, 0);
+    else if (_stricmp(ln, "SETCALIB") == 0)
+    {
+        current_input_mode = mode_input_blocked;
+        enqueue_action(action_setcalib, 0);
+    }
+    else if (_stricmp(ln, "RESET") == 0) enqueue_action(action_reset, 0);
+    else if (_stricmp(ln, "FACTRESET") == 0) enqueue_action(action_freset, 0);
+    else if (_stricmp(ln, "CMD") == 0) current_input_mode = mode_cmd;
+    else printf("!unknown command %s\n", ln);
+    fflush(stdout);
+}
+
 DWORD WINAPI interactive_thread(LPVOID arg)
 {
     action = action_none;
-    aq_wp = 0;
-    aq_rp = 0;
 
     do {
-        if (current_input_mode == mode_input_blocked)
-        {
-            DWORD event = WaitForSingleObject(
-                end_of_input_event, // event handle
-                INFINITE);    // indefinite wait
-
-            if (event != WAIT_OBJECT_0)
-            {
-                printf("Wait error (%d)\n", GetLastError());
-                exit(1);
-            }
-            current_input_mode = mode_menu;
-        }
-
-        while (action != action_none) Sleep(1);
+        while (current_input_mode == mode_input_blocked)
+            Sleep(1);
 
         fgets(ln, 50, stdin);
         while ((ln[strlen(ln) -1] == 13) || (ln[strlen(ln) - 1] == 10)) 
             ln[strlen(ln) - 1] = 0; //strip CR,LF
         if (strlen(ln) == 0) continue;
+        new_input_entered = 1;
 
         //DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
         char loooog[1000];
         sprintf(loooog, "'%s', len=%d, stricmp:%d", ln, strlen(ln), _stricmp("CMD", ln));
         log_session("! processing input line:", loooog);
-		
-        new_input_entered = 1;
 
-        if (current_input_mode == mode_menu)
-        { 
-            if (_stricmp(ln, "HELP") == 0) help();
-            else if (_stricmp(ln, "USAGE") == 0) print_usage();
-            else if (_stricmp(ln, "EXIT") == 0) action = action_exit;
-            else if (_stricmp(ln, "M-") == 0) autosweep = 0;
-            else if (!ready_to_receive_command) printf("!not ready, try again later (%s)\n", ln);
-            else if (_strnicmp(ln, "CONNECT", 7) == 0)
-            {
-                action = action_connect;
-                if ((strlen(ln) > 7) && (ln[8] >= '0') && (ln[8] <= '9'))
-                    sscanf(ln + 8, "%d", &cmdline_a);
-            }
-            else if (_stricmp(ln, "DISCONNECT") == 0) action = action_disconnect;
-            else if (_stricmp(ln, "S11") == 0) cmdline_s11 = 1;
-            else if (_stricmp(ln, "S21") == 0) cmdline_s21 = 1;
-            else if (_stricmp(ln, "S12") == 0) cmdline_s12 = 1;
-            else if (_stricmp(ln, "S22") == 0) cmdline_s22 = 1;
-            else if (_stricmp(ln, "ALL") == 0) cmdline_s11 = cmdline_s21 = cmdline_s12 = cmdline_s22 = 1;
-            else if (_stricmp(ln, "CLEAR") == 0) cmdline_s11 = cmdline_s21 = cmdline_s12 = cmdline_s22 = 0;
-            else if (_strnicmp(ln, "FORM", 4) == 0) set_sending_format(ln[4]);
-            else if (_strnicmp(ln, "FMT", 3) == 0) set_format(ln);
-            else if (_strnicmp(ln, "FREQ", 4) == 0) set_freq_format(ln);
-            else if (_strnicmp(ln, "FILE", 4) == 0) set_file();
-            else if (_stricmp(ln, "MEASURE") == 0) action = action_sweep;
-            else if (_stricmp(ln, "M+") == 0) { autosweep = 1; action = action_sweep; }
-            else if (_stricmp(ln, "GETSTATE") == 0) action = action_getstate;
-            else if (_stricmp(ln, "SETSTATE") == 0) { action = action_setstate; current_input_mode = mode_input_blocked; }
-            else if (_stricmp(ln, "GETCALIB") == 0) action = action_getcalib;
-            else if (_stricmp(ln, "SETCALIB") == 0) { action = action_setcalib; current_input_mode = mode_input_blocked; }
-            else if (_stricmp(ln, "RESET") == 0) action = action_reset;
-            else if (_stricmp(ln, "FACTRESET") == 0) action = action_freset;
-            else if (_stricmp(ln, "CMD") == 0) current_input_mode = mode_cmd;
-            else printf("!unknown command %s\n", ln);    
-            fflush(stdout);
-        }
+        if (_stricmp(ln, "HELP") == 0) help();
+        else if (_stricmp(ln, "USAGE") == 0) print_usage();
+        else if (_stricmp(ln, "EXIT") == 0) { running = 0; break; }
+        else if (_stricmp(ln, "M-") == 0) autosweep = 0;
+        else if (current_input_mode == mode_menu)
+            parse_end_enqueue_menu_action(ln);
         else if (current_input_mode == mode_cmd)
-        {
-            if (ln[0] == '.') current_input_mode = mode_menu;
-            else if (!ready_to_receive_command) printf("!not ready, try again later (%s)\n", ln);
-            else if ((ln[0] == 's') && (strlen(ln) > 2)) action = action_cmd_puts;
-            else if ((ln[0] == 'q') && (strlen(ln) > 2)) action = action_cmd_query;
-            else if (ln[0] == 'a') action = action_cmd_read_asc;
-            else if (ln[0] == 'c') action = action_cmd_continuous_asc;
-            else if (ln[0] == 'd')
-            {
-                sscanf(ln + 2, "%d", &cmd_read_repeat_count);
-                action = action_cmd_repeated_asc;
-            }
-            else if (ln[0] == 'b') action = action_cmd_read_bin;
-            else if (ln[0] == '?') action = action_cmd_status;
-        }
+            parse_end_enqueue_cmd_action(ln);
+    } while (running);
 
-        if (action != action_none)
-        {
-            ready_to_receive_command = 0;
-            if (!SetEvent(action_event))
-            {
-                printf("SetEvent failed (%d)\n", GetLastError());
-                exit(1);
-            }
-        }
-
-    } while (action != action_exit);
     if (connected)
     {
         printf("!auto disconnect before exit\n");
@@ -1528,6 +1592,9 @@ DWORD WINAPI interactive_thread(LPVOID arg)
 
 void create_event_and_thread()
 {
+    aq_wp = 0;
+    aq_rp = 0;
+
     action_event = CreateEvent(
         NULL,               // default security attributes
         FALSE,               // auto-reset event
@@ -1536,20 +1603,6 @@ void create_event_and_thread()
     );
 
     if (action_event == NULL)
-    {
-        printf("CreateEvent failed (%d)\n", GetLastError());
-        fflush(stdout);
-        exit(1);
-    }
-
-    end_of_input_event = CreateEvent(
-        NULL,               // default security attributes
-        FALSE,              // auto-reset event
-        FALSE,              // initial state is nonsignaled
-        0                   // no event object name
-    );
-
-    if (end_of_input_event == NULL)
     {
         printf("CreateEvent failed (%d)\n", GetLastError());
         fflush(stdout);
@@ -1585,76 +1638,46 @@ void create_event_and_thread()
     }
 }
 
-#define MAX_LN_COPY_CHARS 100
 void main_action_loop()
 {
-    static char ln_copy[MAX_LN_COPY_CHARS + 1];
-
     while (running)
     {
-        DWORD event = WaitForSingleObject(
-            action_event, // event handle
-            INFINITE);    // indefinite wait
-        
-        if (event != WAIT_OBJECT_0)
+        DWORD dwWaitResult = WaitForSingleObject(aq_lock, INFINITE);
+        if (dwWaitResult != WAIT_OBJECT_0) 
         {
             printf("Wait error (%d)\n", GetLastError());
             fflush(stdout);
             exit(1);
         }
 
-        action_type requested_action = action;
-        strncpy(ln_copy, ln, MAX_LN_COPY_CHARS);
-        ln_copy[MAX_LN_COPY_CHARS] = 0;
-
-        action = action_none;
-
-        switch (requested_action)
+        if (aq_rp == aq_wp)
         {
-        case action_connect: connect();
-            break;
-        case action_disconnect: disconnect();
-            break;
-        case action_sweep: sweep();
-            break;
-        case action_getstate: getstate();
-            break;
-        case action_setstate: setstate();
-            if (!SetEvent(end_of_input_event))
+            ReleaseMutex(aq_lock);
+            DWORD event = WaitForSingleObject(
+                action_event, // event handle
+                INFINITE);    // indefinite wait
+
+            if (event != WAIT_OBJECT_0)
             {
-                printf("SetEvent failed (%d)\n", GetLastError());
+                printf("Wait error (%d)\n", GetLastError());
                 fflush(stdout);
                 exit(1);
             }
-            break;
-        case action_getcalib: getcalib();
-            break;
-        case action_setcalib: setcalib();
-            if (!SetEvent(end_of_input_event))
+            DWORD dwWaitResult = WaitForSingleObject(aq_lock, INFINITE);
+            if (dwWaitResult != WAIT_OBJECT_0)
             {
-                printf("SetEvent failed (%d)\n", GetLastError());
+                printf("Wait error (%d)\n", GetLastError());
                 fflush(stdout);
                 exit(1);
             }
-            break;
-        case action_cmd_puts: 
-        case action_cmd_status: 
-        case action_cmd_query:
-        case action_cmd_read_asc:
-        case action_cmd_continuous_asc:
-        case action_cmd_repeated_asc:
-        case action_cmd_read_bin:
-            direct_command(requested_action, ln_copy + 2);
-            break;
-        case action_exit: running = 0;
-            break;
-        case action_reset: reset();
-            break;
-        case action_freset: factory_reset();
-            break;
-        }
-        //printf("!ok\n");
-        ready_to_receive_command = 1;
+        }        
+
+        char *aa;
+        action_type requested_action = dequeue_action(&aa);
+        ReleaseMutex(aq_lock);
+
+        if (requested_action != action_none)
+            perform_action(requested_action, aa);
     }
 }
 
@@ -1663,7 +1686,7 @@ void interactive()
     create_event_and_thread();
     main_action_loop();
     CloseHandle(action_event);
-    CloseHandle(end_of_input_event);
+    CloseHandle(aq_lock);
 }
 
 const char* test1argv[] = { "hpctrl", "-a", "16", "-s11", "-s12", "-s21", "-s22" };
