@@ -18,6 +18,8 @@
 
 #define FTOI(x) (S32((x)+0.5))
 
+#define ACTION_QUEUE_SIZE 256
+
 #define SESSION_LOGGING
 
 //DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
@@ -63,6 +65,11 @@ enum action_type {
     action_getcalib, action_setcalib, action_cmd_puts, action_cmd_query, action_cmd_status, action_cmd_read_asc,
     action_cmd_continuous_asc, action_cmd_repeated_asc, action_cmd_read_bin, action_exit, action_reset, action_freset
 };
+
+static action_type action_queue[ACTION_QUEUE_SIZE];
+static char* action_argument[ACTION_QUEUE_SIZE];
+static int aq_wp, aq_rp;
+static HANDLE aq_lock;
 
 static volatile action_type action;
 static int cmd_read_repeat_count;
@@ -1414,6 +1421,8 @@ void set_sending_format(char f)
 DWORD WINAPI interactive_thread(LPVOID arg)
 {
     action = action_none;
+    aq_wp = 0;
+    aq_rp = 0;
 
     do {
         if (current_input_mode == mode_input_blocked)
@@ -1440,7 +1449,7 @@ DWORD WINAPI interactive_thread(LPVOID arg)
         //DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
         char loooog[1000];
         sprintf(loooog, "'%s', len=%d, stricmp:%d", ln, strlen(ln), _stricmp("CMD", ln));
-        log_session("! processing input line: '", loooog);
+        log_session("! processing input line:", loooog);
 		
         new_input_entered = 1;
 
@@ -1543,6 +1552,19 @@ void create_event_and_thread()
     if (end_of_input_event == NULL)
     {
         printf("CreateEvent failed (%d)\n", GetLastError());
+        fflush(stdout);
+        exit(1);
+    }
+
+    aq_lock = CreateMutex(
+        NULL,           // default security attributes
+        FALSE,          // initially not owned
+        NULL            // unnamed mutex
+    );
+
+    if (aq_lock == NULL)
+    {
+        printf("CreateMutex failed (%d)\n", GetLastError());
         fflush(stdout);
         exit(1);
     }
