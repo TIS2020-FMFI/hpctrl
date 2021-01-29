@@ -27,7 +27,7 @@ void log_session(const char *a, const char *b)
 {
 #ifdef SESSION_LOGGING
     FILE* f = fopen("log_session.txt", "a+");
-    fprintf(f, "%s %s\n", a, b);
+    fprintf(f, "%s '%s'\n", a, b);
     fclose(f);
 #endif
 }
@@ -1265,7 +1265,9 @@ void direct_command(action_type requested_action, const char *action_argument)
         fflush(stdout);
         break;
     case action_cmd_read_asc:
-        data = (uint8_t *)GPIB_read_ASC();        
+        data = (uint8_t *)GPIB_read_ASC(); 
+        //DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
+        log_session("! ASC:", (const char*)data);
         printf("%s", data);
         fflush(stdout);
         break;
@@ -1427,7 +1429,9 @@ void perform_action(action_type action, char *action_argument)
 {
     switch (action)
     {
-    case action_connect: connect(); break;
+    case action_connect: if (action_argument) sscanf(action_argument, "%d", &cmdline_a);
+                         connect(); 
+                         break;
     case action_disconnect: disconnect(); break;
     case action_s11: cmdline_s11 = 1; break;
     case action_s12: cmdline_s12 = 1; break;
