@@ -20,16 +20,32 @@
 
 #define ACTION_QUEUE_SIZE 256
 
-#define SESSION_LOGGING
+int session_logging = 0;
+HANDLE gpib_mutex;
 
-//DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
-void log_session(const char *a, const char *b)
+C8* timestamp(void);
+
+void log_session(const char* a, const char* b)
 {
-#ifdef SESSION_LOGGING
-    FILE* f = fopen("log_session.txt", "a+");
-    fprintf(f, "%s %s\n", a, b);
-    fclose(f);
-#endif
+    if (session_logging)
+    {
+        FILE* f = fopen("log_session.txt", "a+");
+        const char* logmsg = b + strlen(b) - 1;
+        char* logm = 0;
+        if ((*logmsg == '\n') || (*logmsg == '\r'))
+        {
+            char* logm = (char*)malloc(strlen(b) + 1);
+            strcpy(logm, b);
+            logmsg = logm;
+            logm += strlen(logm) - 1;
+            while ((logm > logmsg) && ((*logm == '\n') || (*logm == '\r')))
+                *(logm--) = 0;
+        }
+        else logmsg = b;
+        fprintf(f, "%s %s '%s'\n", timestamp(), a, logmsg);
+        fclose(f);
+        if (logm != 0) free(logm);
+    }
 }
 
 static int cmdline_i = 0;
@@ -39,7 +55,6 @@ static int cmdline_s21 = 0;
 static int cmdline_s12 = 0;
 static int cmdline_s22 = 0;
 
-static volatile int ready_to_receive_command = 1;
 static volatile int running = 1;
 static volatile int autosweep = 0;
 static char *save_file_name = 0;
@@ -63,11 +78,13 @@ static char ln[52];
 enum action_type {
     action_none, action_connect, action_disconnect, action_sweep, action_getstate, action_setstate,
     action_getcalib, action_setcalib, action_cmd_puts, action_cmd_query, action_cmd_status, action_cmd_read_asc,
-    action_cmd_continuous_asc, action_cmd_repeated_asc, action_cmd_read_bin, action_exit, action_reset, action_freset
+    action_cmd_continuous_asc, action_cmd_repeated_asc, action_cmd_read_bin, action_exit, action_reset, action_freset,
+    action_s11, action_s12, action_s21, action_s22, action_all, action_clear, action_form, action_fmt, action_freq,
+    action_file, action_autosweep
 };
 
 static action_type action_queue[ACTION_QUEUE_SIZE];
-static char* action_argument[ACTION_QUEUE_SIZE];
+static char* action_arguments[ACTION_QUEUE_SIZE];
 static int aq_wp, aq_rp;
 static HANDLE aq_lock;
 
@@ -75,13 +92,35 @@ static volatile action_type action;
 static int cmd_read_repeat_count;
 
 
-HANDLE action_event, end_of_input_event;
+HANDLE action_event;
 
 
 void WINAPI GPIB_error(C8* msg, S32 ibsta, S32 iberr, S32 ibcntl)
 {
     printf("GPIB Error %s, ibsta=%d, iberr=%d, ibcntl=%d\n", msg, ibsta, iberr, ibcntl);
     exit(1);
+}
+
+void gpib_lock()
+{
+    DWORD dwWaitResult;
+    do {
+        dwWaitResult = WaitForSingleObject(gpib_mutex,    // handle to mutex
+            INFINITE);  // no time-out interval
+    } while (dwWaitResult != WAIT_OBJECT_0);
+}
+
+void gpib_unlock()
+{
+    if (!ReleaseMutex(gpib_mutex))
+        printf("error releasing mutex: %d\n", GetLastError());
+}
+
+int gpib_trylock()
+{
+    DWORD dwWaitResult = WaitForSingleObject(gpib_mutex, 1);
+    if (dwWaitResult == WAIT_OBJECT_0) return 1;
+    return 0;
 }
 
 void conv_RI_2_MA(double r, double i, double *m, double *a)
@@ -261,17 +300,27 @@ void instrument_setup(bool debug_mode = TRUE)
 {
     if (debug_mode)
     {
+        log_session("p>", "DEBUON;");
+        gpib_lock();
         GPIB_printf("DEBUON;");
+        gpib_unlock();
     }
 
+    log_session("q>", "OUTPIDEN");
+    gpib_lock();
     C8* data = GPIB_query("OUTPIDEN");
+    gpib_unlock();
     _snprintf(instrument_name, sizeof(instrument_name) - 1, "%s", data);
     instrument_name[sizeof(instrument_name) - 1] = 0;
+    log_session("q:", instrument_name);
     if (strlen(instrument_name) > 0)
         if (instrument_name[strlen(instrument_name) - 1] == '\n')
             instrument_name[strlen(instrument_name) - 1] = 0;
     //printf("instrument name: %s\n", data);   
+    log_session("p>", "HOLD;");
+    gpib_lock();
     GPIB_printf("HOLD;");
+    gpib_unlock();
 }
 
 bool read_complex_trace(const C8* param,
@@ -282,15 +331,45 @@ bool read_complex_trace(const C8* param,
 {
     U8 mask = 0x40;
 
-    if (is_8753()) { GPIB_printf("CLES;SRE 4;ESNB 1;"); mask = 0x40; }  // Extended register bit 0 = SING sweep complete; map it to status bit and enable SRQ on it 
-    if (is_8752()) { GPIB_printf("CLES;SRE 4;ESNB 1;"); mask = 0x40; }
-    if (is_8720()) { GPIB_printf("CLES;SRE 4;ESNB 1;"); mask = 0x40; }
-    if (is_8510()) { GPIB_printf("CLES;");              mask = 0x10; }
+    if (is_8753()) {
+        log_session("p>", "CLES;SRE 4;ESNB 1;");
+        gpib_lock();
+        GPIB_printf("CLES;SRE 4;ESNB 1;"); mask = 0x40;
+        gpib_unlock();
+    }  // Extended register bit 0 = SING sweep complete; map it to status bit and enable SRQ on it 
+    if (is_8752()) {
+        log_session("p>", "CLES;SRE 4;ESNB 1;");
+        gpib_lock();
+        GPIB_printf("CLES;SRE 4;ESNB 1;"); mask = 0x40;
+        gpib_unlock();
+    }
+    if (is_8720()) {
+        log_session("p>", "CLES;SRE 4;ESNB 1;");
+        GPIB_printf("CLES;SRE 4;ESNB 1;"); mask = 0x40;
+    }
+    if (is_8510()) {
+        log_session("p>", "CLES;");
+        gpib_lock();
+        GPIB_printf("CLES;");              mask = 0x10;
+        gpib_unlock();
+    }
 
     if (current_sending_format == form4)
+    {
+        log_session("p>", param);
+        log_session("p>", "FORM4;SING;");
+        gpib_lock();
         GPIB_printf("%s;FORM4;SING;", param);
+        gpib_unlock();
+    }
     else if (current_sending_format == form1)
+    {
+        log_session("p>", param);
+        log_session("p>", "FORM1;SING;");
+        gpib_lock();
         GPIB_printf("%s;FORM1;SING;", param);
+        gpib_unlock();
+    }
 
     if (is_8510())             // Skip first reading to ensure EOS bit is clear, but only on 8510 
     {                       // (SRQ bit auto-resets after the first successful poll on 8753)   
@@ -303,7 +382,9 @@ bool read_complex_trace(const C8* param,
     {
         Sleep(1);
 
+        gpib_lock();
         U8 result = GPIB_serial_poll();
+        gpib_unlock();
 
         if (result & mask)
         {
@@ -312,18 +393,44 @@ bool read_complex_trace(const C8* param,
         }
     }
 
-    if (is_8753()) { GPIB_printf("CLES;SRE 0;"); }
-    if (is_8752()) { GPIB_printf("CLES;SRE 0;"); }
-    if (is_8720()) { GPIB_printf("CLES;SRE 0;"); }
-    if (is_8510()) { GPIB_printf("CLES;"); }
+    if (is_8753()) { 
+        log_session("p>", "CLES;SRE 0;");
+        gpib_lock();
+        GPIB_printf("CLES;SRE 0;"); 
+        gpib_unlock();
+    }
+    if (is_8752()) { 
+        log_session("p>", "CLES;SRE 0;");
+        gpib_lock();
+        GPIB_printf("CLES;SRE 0;"); 
+        gpib_unlock();
+    }
+    if (is_8720()) { 
+        log_session("p>", "CLES;SRE 0;");
+        gpib_lock();
+        GPIB_printf("CLES;SRE 0;");
+        gpib_unlock();
+    }
+    if (is_8510()) { 
+        log_session("p>", "CLES;");
+        gpib_lock();
+        GPIB_printf("CLES;"); 
+        gpib_unlock();
+    }
 
+    log_session("p>", query);
+    gpib_lock();
     GPIB_printf("%s;", query);
+    gpib_unlock();
 
     if (current_sending_format == form4)
     {
         for (S32 i = 0; i < cnt; i++)
         {
+            gpib_lock();
             C8* data = GPIB_read_ASC(-1, FALSE);
+            gpib_unlock();
+            log_session("a:", data);
 
             DOUBLE I = DBL_MIN;
             DOUBLE Q = DBL_MIN;
@@ -347,13 +454,15 @@ bool read_complex_trace(const C8* param,
          //
 
         S32 actual = 0;
+        gpib_lock();
         uint8_t* data = (uint8_t*)GPIB_read_BIN(2, TRUE, FALSE, &actual);
-
+        gpib_unlock();
         if (actual != 2)
         {
             printf("Error: data header query returned %d bytes", actual);
             return 0;
         }
+        log_session("b:", "...");
 
         if ((data[0] != '#') || (data[1] != 'A'))
         {
@@ -366,7 +475,9 @@ bool read_complex_trace(const C8* param,
         //
 
         actual = 0;
+        gpib_lock();
         data = (uint8_t*)GPIB_read_BIN(2, TRUE, FALSE, &actual);
+        gpib_unlock();
 
         S32 len = S16_BE((C8*)data);
 
@@ -375,12 +486,15 @@ bool read_complex_trace(const C8* param,
             printf("Error: data len returned %d bytes", actual);
             return 0;
         }
+        log_session("b:", "...");
 
         //
         // Get data
         //
 
+        gpib_lock();
         data = (uint8_t*)GPIB_read_BIN(len, TRUE, FALSE, &actual);
+        gpib_unlock();
 
         if (actual != len)
         {
@@ -393,6 +507,7 @@ bool read_complex_trace(const C8* param,
             printf("Error: data cnt = %d, cnt*6 = %d, but len = %d", cnt, cnt * 6, len);
             return 0;
         }
+        log_session("b:", "...");
 
         for (int i = 0; i < cnt; i++)
             conv_form1_2_RI(data + 6 * i, &dest[i].real, &dest[i].imag);
@@ -515,14 +630,26 @@ int sweep()
         printf("!not connected\n");
         return 0;
     }
+    log_session("q>", "FORM4;STAR;OUTPACTI;");
+    gpib_lock();
     C8* data = GPIB_query("FORM4;STAR;OUTPACTI;");
+    gpib_unlock();
     sscanf(data, "%lf", &start_Hz);
+    log_session("q:", data);
+    log_session("q>", "STOP;OUTPACTI;");
+    gpib_lock();
     data = GPIB_query("STOP;OUTPACTI;");
+    gpib_unlock();
     sscanf(data, "%lf", &stop_Hz);
+    log_session("q:", data);
 
+    log_session("q>", "POIN;OUTPACTI;");
+    gpib_lock();
     data = GPIB_query("POIN;OUTPACTI;");
+    gpib_unlock();
     DOUBLE fn = 0.0;
     sscanf(data, "%lf", &fn);
+    log_session("q:", data);
     S32 n = (S32)(fn + 0.5);
 
     if ((n < 1) || (n > 1000000))
@@ -578,7 +705,12 @@ int sweep()
 
     if (!is_8510())
     {
-        lin_sweep = (GPIB_query("LINFREQ?;")[0] == '1');
+        log_session("q>", "LINFREQ?;");
+        gpib_lock();
+        char* qresp = GPIB_query("LINFREQ?;");
+        gpib_unlock();
+        lin_sweep = (qresp[0] == '1');
+        log_session("q:", "LINFREQ?;");
     }
 
     if (lin_sweep)
@@ -590,11 +722,17 @@ int sweep()
     }
     else
     {
+        log_session("p>", "OUTPLIML;");
+        gpib_lock();
         GPIB_printf("OUTPLIML;");
+        gpib_unlock();
 
         for (S32 i = 0; i < n_AC_points; i++)
         {
+            gpib_lock();
             C8* data = GPIB_read_ASC(-1, FALSE);
+            gpib_unlock();
+            log_session("a:", data);
 
             DOUBLE f = DBL_MIN;
             sscanf(data, "%lf", &f);
@@ -627,7 +765,12 @@ int sweep()
             C8 text[512] = { 0 };
             _snprintf(text, sizeof(text) - 1, "%s?", param_names[active_param]);
 
-            if (GPIB_query(text)[0] == '1')
+            log_session("q>", text);
+            gpib_lock();
+            char* qstr = GPIB_query(text);
+            gpib_unlock();
+            log_session("q:", qstr);
+            if (qstr[0] == '1')
             {
                 break;
             }
@@ -695,11 +838,17 @@ int sweep()
         &&
         (active_param <= 3))
     {
+        log_session("p>", param_names[active_param]);
+        gpib_lock();
         GPIB_printf(param_names[active_param]);
+        gpib_unlock();
         Sleep(500);
     }
 
+    log_session("p>", "DEBUOFF;CONT;");
+    gpib_lock();
     GPIB_printf("DEBUOFF;CONT;");
+    gpib_unlock();
 
     free(freq_Hz);
     free(S11);
@@ -735,7 +884,10 @@ void getcalib()
     }
     Sleep(500);
 
+    log_session("w>", "FORM1;");
+    gpib_lock();
     GPIB_write("FORM1;");
+    gpib_unlock();
 
     if (is_8510())
     {
@@ -752,7 +904,11 @@ void getcalib()
 
         S32 n_types = ARY_CNT(cnts);
 
+        log_session("q>", "CALI?;");
+        gpib_lock();
         C8* result = GPIB_query("CALI?;");
+        gpib_unlock();
+        log_session("q:", result);
         C8* term = strrchr(result, '"');                          // Remove leading and trailing quotes returned by 8510
 
         if (term != NULL)
@@ -766,7 +922,12 @@ void getcalib()
             if (!_stricmp(result, types[i]))
             {
                 active_cal_type = i;
-                active_cal_set = atoi(GPIB_query("CALS?;"));
+                log_session("q>", "CALS?;");
+                gpib_lock();
+                char* qstr = GPIB_query("CALS?;");
+                gpib_unlock();
+                log_session("q:", qstr);
+                active_cal_set = atoi(qstr);
                 break;
             }
         }
@@ -776,7 +937,11 @@ void getcalib()
             const C8* active_cal_name = names[active_cal_type];   // Get name of active calibration type
             S32       n_arrays = cnts[active_cal_type];    // Get # of data arrays for active calibration type
 
+            log_session("q>", "POIN;OUTPACTI;");
+            gpib_lock();
             data = (uint8_t*)GPIB_query("POIN;OUTPACTI;");                  // Get # of points in calibrated trace 
+            gpib_unlock();
+            log_session("q:", (char *)data);
             DOUBLE fnpts = 0.0;
             sscanf((C8*)data, "%lf", &fnpts);
             S32 trace_points = FTOI(fnpts);
@@ -802,9 +967,15 @@ void getcalib()
             {
                 n += array_bytes;
 
-                GPIB_printf("FORM1;OUTPCALC%d%d;", (j + 1) / 10, (j + 1) % 10);
+                char str[30];
+                sprintf(str, "FORM1;OUTPCALC%d%d;", (j + 1) / 10, (j + 1) % 10);
+                log_session("q>", str);
 
+                gpib_lock();
+                GPIB_printf(str);
                 data = (uint8_t*)GPIB_read_BIN(2);
+                gpib_unlock();
+                log_session("b:", "...");
 
                 if ((data[0] != '#') || (data[1] != 'A'))
                 {
@@ -814,7 +985,9 @@ void getcalib()
 
                 U16 H = *(U16*)data;
 
+                gpib_lock();
                 data = (uint8_t*)GPIB_read_BIN(2);
+                gpib_unlock();
 
                 len = S16_BE((C8*)data);
 
@@ -823,6 +996,8 @@ void getcalib()
                     printf("Error: OUTPCALC returned %d bytes, expected %d", len, array_bytes);
                     return;
                 }
+                log_session("b:", "...");
+
 
                 U16 N = *(U16*)data;
 
@@ -830,7 +1005,10 @@ void getcalib()
                 printf("%d\n", N);
                 printf("INPUCALC%d%d;", (j + 1) / 10, (j + 1) % 10);
 
+                gpib_lock();
                 C8* IQ = GPIB_read_BIN(array_bytes, TRUE, FALSE, &actual);
+                gpib_unlock();
+                log_session("b:", "...");
 
                 if (actual != array_bytes)
                 {
@@ -898,10 +1076,18 @@ void getcalib()
             n_types--;
         }
 
+        char str[40];
+
         for (S32 i = 0; i < n_types; i++)
         {
-            GPIB_printf("%s?;", types[i]);
+            sprintf(str, "%s?;", types[i]);
+            log_session("p>", str);
+            GPIB_printf(str);
+            gpib_lock();
             C8* result = GPIB_read_ASC();
+            gpib_unlock();
+            log_session("a:", result);
+
 
             if (result[0] == '1')
             {
@@ -915,7 +1101,11 @@ void getcalib()
             const C8* active_cal_name = types[active_cal_type];   // Get name of active calibration type
             S32       n_arrays = cnts[active_cal_type];    // Get # of data arrays for active calibration type
 
+            log_session("q>", "FORM3;POIN?;");
+            gpib_lock();
             data = (uint8_t*)GPIB_query("FORM3;POIN?;");                    // Get # of points in calibrated trace
+            gpib_unlock();
+            log_session("q:", (char *)data);
             DOUBLE fnpts = 0.0;
             sscanf((C8*)data, "%lf", &fnpts);
             S32 trace_points = FTOI(fnpts);
@@ -938,9 +1128,13 @@ void getcalib()
             {
                 n += array_bytes;
 
-                GPIB_printf("FORM1;OUTPCALC%d%d;", (j + 1) / 10, (j + 1) % 10);
+                sprintf(str, "FORM1;OUTPCALC%d%d;", (j + 1) / 10, (j + 1) % 10);
+                log_session("p>", str);
+                gpib_lock();
+                GPIB_printf(str);
 
                 data = (uint8_t*)GPIB_read_BIN(2);
+                gpib_unlock();
 
                 if ((data[0] != '#') || (data[1] != 'A'))
                 {
@@ -950,7 +1144,9 @@ void getcalib()
 
                 U16 H = *(U16*)data;
 
+                gpib_lock();
                 data = (uint8_t*)GPIB_read_BIN(2);
+                gpib_unlock();
 
                 len = S16_BE((C8*)data);
 
@@ -960,12 +1156,15 @@ void getcalib()
                     fflush(stdout);
                     return;
                 }
+                log_session("b:", "...");
 
                 U16 N = *(U16*)data;
 
                 //printf("INPUCALC%d%d;", (j + 1) / 10, (j + 1) % 10);
 
+                gpib_lock();
                 uint8_t* IQ = (uint8_t*)GPIB_read_BIN(array_bytes, TRUE, FALSE, &actual);
+                gpib_unlock();
 
                 if (actual != array_bytes)
                 {
@@ -973,6 +1172,7 @@ void getcalib()
                     fflush(stdout);
                     return;
                 }
+                log_session("b:", "...");
 
                 printf("%d\n", array_bytes);
                 for (int i = 0; i < array_bytes; i++)
@@ -993,7 +1193,11 @@ void getcalib()
     fflush(stdout);
 
     Sleep(500);
+    log_session("p>", "DEBUOFF;CONT;");
+    gpib_lock();
     GPIB_printf("DEBUOFF;CONT;");
+    gpib_unlock();
+
 }
 
 void getstate()
@@ -1017,7 +1221,10 @@ void getstate()
 
     Sleep(500);
 
+    log_session("w>", "FORM1;OUTPLEAS;");
+    gpib_lock();
     GPIB_write("FORM1;OUTPLEAS;");
+
 
     //
     // Verify its header 
@@ -1025,6 +1232,8 @@ void getstate()
 
     S32 actual = 0;
     uint8_t *data = (uint8_t *)GPIB_read_BIN(2, TRUE, FALSE, &actual);
+    gpib_unlock();
+
 
     if (actual != 2)
     {
@@ -1049,7 +1258,11 @@ void getstate()
     //
 
     actual = 0;
+    gpib_lock();
     data = (uint8_t *)GPIB_read_BIN(2, TRUE, FALSE, &actual);
+    gpib_unlock();
+    log_session("b:", "...");
+
 
     S32 len = S16_BE((C8 *)data);
 
@@ -1067,7 +1280,10 @@ void getstate()
     // Get learn string data
     //
 
+    gpib_lock();
     data = (uint8_t *)GPIB_read_BIN(len, TRUE, FALSE, &learn_string_size);
+    gpib_unlock();
+    log_session("b:", "...");
 
     if (learn_string_size != len)
     {
@@ -1084,6 +1300,9 @@ void getstate()
     fflush(stdout);
 
     Sleep(500);
+    gpib_lock();
+    log_session("p>", "DEBUOFF;CONT;");
+    gpib_unlock();
     GPIB_printf("DEBUOFF;CONT;");
 }
 
@@ -1099,7 +1318,14 @@ void setcalib()
     char active_cal_name[20];
     int n_arrays;
     scanf("%20s\n", active_cal_name);
-    GPIB_printf("CORROFF;FORM1;%s;", active_cal_name);
+
+    char str[40];
+    sprintf(str, "CORROFF;FORM1;%s;", active_cal_name);
+    log_session("p>", str);
+    gpib_lock();
+    GPIB_printf(str);
+    gpib_unlock();
+
     scanf("%d", &n_arrays);
     for (int i = 0; i < n_arrays; i++)
     {
@@ -1121,27 +1347,44 @@ void setcalib()
             if ((i % 40 == 39) && (i < array_bytes - 1)) scanf("\n");
         }
         
+        log_session("b>", "...");
+        gpib_lock();
         GPIB_write_BIN(data, 15 + array_bytes);
+        gpib_unlock();
+
         Sleep(250);
 
+        log_session("p>", "CLES;SRE 32;ESE 1;OPC;SAVC;");
+        gpib_lock();
         GPIB_printf("CLES;SRE 32;ESE 1;OPC;SAVC;");
+        gpib_unlock();
 
         S32 st = timeGetTime();
         while (1)
         {
             Sleep(100);
+            gpib_lock();
             U8 result = GPIB_serial_poll();
+            gpib_unlock();
+
             if (result & 0x40)
             {
                 printf("!Complete in %d ms\n", timeGetTime() - st);
                 break;
             }
         }
+        log_session("p>", "CLES;SRE 0;");
+        gpib_lock();
         GPIB_printf("CLES;SRE 0;");
+        gpib_unlock();
+
         free(data);
     }
     Sleep(1500);
-    GPIB_printf("DEBUOFF;CONT;");    
+    log_session("p>", "DEBUOFF;CONT;");
+    gpib_lock();
+    GPIB_printf("DEBUOFF;CONT;");
+    gpib_unlock();
 }
 
 void setstate()
@@ -1188,10 +1431,17 @@ void setstate()
     //scanf("\n");
     //printf("!going to send...\n");
         
-    GPIB_write_BIN(data, length + 19);    
+    log_session("b>", "...");
+    gpib_lock();
+    GPIB_write_BIN(data, length + 19);
+    gpib_unlock();
     Sleep(1500);
 
+    log_session("p>", "DEBUOFF;CONT;");
+    gpib_lock();
     GPIB_printf("DEBUOFF;CONT;");
+    gpib_unlock();
+
     free(data);
 }
 
@@ -1203,7 +1453,11 @@ void reset()
         fflush(stdout);
         return;
     }
-    GPIB_puts("PRES;");
+
+    log_session("p>", "DEBUOFF;CONT;");
+    gpib_lock();
+    GPIB_puts("DEBUOFF;CONT;");
+    gpib_unlock();
 }
 
 void factory_reset()
@@ -1216,18 +1470,31 @@ void factory_reset()
     }
     if (!is_8510())
     {
+        log_session("p>", "RST;");
+        gpib_lock();
         GPIB_puts("RST;");
+        gpib_unlock();
     }
     else
     {
         if (is_8510C())
+        {
+            log_session("p>", "FACTPRES;");
+            gpib_lock();
             GPIB_puts("FACTPRES;");
+            gpib_unlock();
+        }
         else
+        {
+            log_session("p>", "PRES;");
+            gpib_lock();
             GPIB_puts("PRES;");
+            gpib_unlock();
+        }
     }
 }
 
-void direct_command(action_type requested_action, const char *string_to_send)
+void direct_command(action_type requested_action, const char *action_argument)
 {
     // s string   - send string using gpib_puts()
     // q query    - send string using gpib_query() and print result
@@ -1254,45 +1521,64 @@ void direct_command(action_type requested_action, const char *string_to_send)
     {
     case action_cmd_puts:
         //DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
-	    log_session("! GPIB_puts: '", string_to_send);
-        GPIB_puts(string_to_send);
+	    log_session("s>", action_argument);
+        gpib_lock();
+        GPIB_puts(action_argument);
+        gpib_unlock();
         break;
     case action_cmd_query:
-        response = GPIB_query(string_to_send);
+        log_session("q>", action_argument);
+        gpib_lock();
+        response = GPIB_query(action_argument);
+        gpib_unlock();
+        log_session("q:", response);
         printf("%s", response);
         fflush(stdout);
         break;
     case action_cmd_read_asc:
-        data = (uint8_t *)GPIB_read_ASC();        
+        gpib_lock();
+        data = (uint8_t *)GPIB_read_ASC(); 
+        gpib_unlock();
+        log_session("a:", (const char*)data);
         printf("%s", data);
         fflush(stdout);
         break;
     case action_cmd_continuous_asc:
         do {
+            gpib_lock();
             data = (uint8_t*)GPIB_read_ASC();
+            gpib_unlock();
             if (strlen((char *)data) > 0)
             {
                 printf("%s", data);
                 fflush(stdout);
-                log_session("arrived new read_ASC", (const char *)data);
+                log_session("c:", (const char *)data);
             }
             else Sleep(1);
         } while (!new_input_entered);
         break;
     case action_cmd_repeated_asc:
+        sscanf(action_argument, "%d", &cmd_read_repeat_count);
+
         for (int i = 0; i < cmd_read_repeat_count; i++)
         {
+            gpib_lock();
             data = (uint8_t*)GPIB_read_ASC();
+            gpib_unlock();
             if (strlen((char*)data) > 0)
             {
                 printf("%s", data);
                 fflush(stdout);
+                log_session("d:", (const char*)data);
             }
             else Sleep(1);
         } 
         break;
     case action_cmd_read_bin:
+        gpib_lock();
         data = (uint8_t*)GPIB_read_BIN();
+        gpib_unlock();
+        log_session("b:", "...");
         if ((data[0] != '#') || (data[1] != 'A'))
         {
             printf("!header not received\n");
@@ -1306,9 +1592,14 @@ void direct_command(action_type requested_action, const char *string_to_send)
         fflush(stdout);
         break;
     case action_cmd_status:
+        gpib_lock();
         S32 status = GPIB_status();            
+        gpib_unlock();
         printf("%d\n", status);
         fflush(stdout);
+        char status_str[20];
+        sprintf(status_str, "%d", status);
+        log_session("?:", status_str);
         break;
     } 
 }
@@ -1356,6 +1647,8 @@ void help()
     printf("             ?      ... read and print status\n");
     printf("             .      ... leave direct command mode\n");
     printf("         HELP       ... print this help\n");
+    printf("         LOGON      ... turn on session logging to log_session.txt\n");
+    printf("         LOGOFF     ... turn off session logging (default)\n");
     printf("         EXIT       ... terminate the application\n");
     fflush(stdout);
 }
@@ -1418,116 +1711,179 @@ void set_sending_format(char f)
     }
 }
 
+void perform_action(action_type action, char *action_argument)
+{
+    switch (action)
+    {
+    case action_connect: if (action_argument) sscanf(action_argument, "%d", &cmdline_a);
+                         connect(); 
+                         break;
+    case action_disconnect: disconnect(); break;
+    case action_s11: cmdline_s11 = 1; break;
+    case action_s12: cmdline_s12 = 1; break;
+    case action_s21: cmdline_s21 = 1; break;
+    case action_s22: cmdline_s22 = 1; break;
+    case action_all: cmdline_s11 = cmdline_s21 = cmdline_s12 = cmdline_s22 = 1; break;
+    case action_clear: cmdline_s11 = cmdline_s21 = cmdline_s12 = cmdline_s22 = 0; break;
+    case action_form: set_sending_format(action_argument[0]); break;
+    case action_fmt: set_format(action_argument); break;
+    case action_freq: set_freq_format(action_argument); break;
+    case action_file: set_file(); break;
+    case action_sweep: sweep(); break;
+    case action_autosweep: autosweep = 1; sweep(); break;
+    case action_getstate: getstate(); break;
+    case action_setstate: setstate(); current_input_mode = mode_menu; break;
+    case action_getcalib: getcalib(); break;
+    case action_setcalib: setcalib(); current_input_mode = mode_menu; break;
+    case action_cmd_puts:
+    case action_cmd_status:
+    case action_cmd_query:
+    case action_cmd_read_asc:
+    case action_cmd_continuous_asc:
+    case action_cmd_repeated_asc:
+    case action_cmd_read_bin:
+        direct_command(action, action_argument);
+        break;
+    case action_reset: reset(); break;
+    case action_freset: factory_reset(); break;
+    }
+    if (action_argument) free(action_argument);
+}
+
+// mutex already locked when dequeue_action called
+action_type dequeue_action(char** action_argument)
+{
+    *action_argument = 0;
+    if (aq_rp == aq_wp) return action_none;
+    action_type at = action_queue[aq_rp];
+    *action_argument = action_arguments[aq_rp];
+    aq_rp = (aq_rp + 1) % ACTION_QUEUE_SIZE;
+    return at;
+}
+
+void enqueue_action(action_type action, char* action_argument)
+{
+    char* aa = 0;
+    if (action_argument)
+    {
+        aa = (char*)malloc(strlen(action_argument) + 1);
+        strcpy(aa, action_argument);
+    }
+
+    DWORD dwWaitResult = WaitForSingleObject(aq_lock, INFINITE);
+    if (dwWaitResult != WAIT_OBJECT_0) return;
+
+    action_queue[aq_wp] = action;
+    action_arguments[aq_wp] = aa;
+    if (aq_wp == aq_rp) 
+      if (!SetEvent(action_event))
+      {
+          printf("SetEvent failed (%d)\n", GetLastError());
+          exit(1);
+      }
+    aq_wp = (aq_wp + 1) % ACTION_QUEUE_SIZE;
+    if (aq_wp == aq_rp)
+    {
+        printf("The capacity of action queue (%d) was exahusted\n", ACTION_QUEUE_SIZE);
+        exit(1);
+    }
+    ReleaseMutex(aq_lock);
+}
+
+void parse_end_enqueue_cmd_action(char* ln)
+{
+    if (ln[0] == '.') current_input_mode = mode_menu;
+    else if ((ln[0] == 's') && (strlen(ln) > 2)) enqueue_action(action_cmd_puts, ln + 2);
+    else if ((ln[0] == 'q') && (strlen(ln) > 2)) enqueue_action(action_cmd_query, ln + 2);
+    else if (ln[0] == 'a') enqueue_action(action_cmd_read_asc, ln + 2);
+    else if (ln[0] == 'c') enqueue_action(action_cmd_continuous_asc, ln + 2);
+    else if (ln[0] == 'd') enqueue_action(action_cmd_repeated_asc, ln + 2);
+    else if (ln[0] == 'b') enqueue_action(action_cmd_read_bin, 0); 
+    else if (ln[0] == '?') enqueue_action(action_cmd_status, 0);
+}
+
+void parse_end_enqueue_menu_action(char* ln)
+{
+    if (_strnicmp(ln, "CONNECT", 7) == 0)
+    {
+        if ((strlen(ln) > 7) && (ln[8] >= '0') && (ln[8] <= '9'))
+            enqueue_action(action_connect, ln + 8);
+        else enqueue_action(action_connect, 0);
+    }
+    else if (_stricmp(ln, "DISCONNECT") == 0) enqueue_action(action_disconnect, 0);
+    else if (_stricmp(ln, "S11") == 0) enqueue_action(action_s11, 0);
+    else if (_stricmp(ln, "S21") == 0) enqueue_action(action_s21, 0);
+    else if (_stricmp(ln, "S12") == 0) enqueue_action(action_s12, 0);
+    else if (_stricmp(ln, "S22") == 0) enqueue_action(action_s22, 0);
+    else if (_stricmp(ln, "ALL") == 0) enqueue_action(action_all, 0);
+    else if (_stricmp(ln, "CLEAR") == 0) enqueue_action(action_clear, 0);
+    else if (_strnicmp(ln, "FORM", 4) == 0) enqueue_action(action_form, ln + 4);
+    else if (_strnicmp(ln, "FMT", 3) == 0) enqueue_action(action_fmt, ln);
+    else if (_strnicmp(ln, "FREQ", 4) == 0) enqueue_action(action_freq, ln);
+    else if (_strnicmp(ln, "FILE", 4) == 0) enqueue_action(action_file, ln);
+    else if (_stricmp(ln, "MEASURE") == 0) enqueue_action(action_sweep, 0);
+    else if (_stricmp(ln, "M+") == 0) enqueue_action(action_autosweep, 0);
+    else if (_stricmp(ln, "GETSTATE") == 0) enqueue_action(action_getstate, 0);
+    else if (_stricmp(ln, "SETSTATE") == 0)
+    {
+        current_input_mode = mode_input_blocked;
+        enqueue_action(action_setstate, 0);
+    }
+    else if (_stricmp(ln, "GETCALIB") == 0) enqueue_action(action_getcalib, 0);
+    else if (_stricmp(ln, "SETCALIB") == 0)
+    {
+        current_input_mode = mode_input_blocked;
+        enqueue_action(action_setcalib, 0);
+    }
+    else if (_stricmp(ln, "RESET") == 0) enqueue_action(action_reset, 0);
+    else if (_stricmp(ln, "FACTRESET") == 0) enqueue_action(action_freset, 0);
+    else if (_stricmp(ln, "CMD") == 0) current_input_mode = mode_cmd;
+    else printf("!unknown command %s\n", ln);
+    fflush(stdout);
+}
+
 DWORD WINAPI interactive_thread(LPVOID arg)
 {
     action = action_none;
-    aq_wp = 0;
-    aq_rp = 0;
 
     do {
-        if (current_input_mode == mode_input_blocked)
-        {
-            DWORD event = WaitForSingleObject(
-                end_of_input_event, // event handle
-                INFINITE);    // indefinite wait
-
-            if (event != WAIT_OBJECT_0)
-            {
-                printf("Wait error (%d)\n", GetLastError());
-                exit(1);
-            }
-            current_input_mode = mode_menu;
-        }
-
-        while (action != action_none) Sleep(1);
+        while (current_input_mode == mode_input_blocked)
+            Sleep(1);
 
         fgets(ln, 50, stdin);
         while ((ln[strlen(ln) -1] == 13) || (ln[strlen(ln) - 1] == 10)) 
             ln[strlen(ln) - 1] = 0; //strip CR,LF
         if (strlen(ln) == 0) continue;
-
-        //DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
-        char loooog[1000];
-        sprintf(loooog, "'%s', len=%d, stricmp:%d", ln, strlen(ln), _stricmp("CMD", ln));
-        log_session("! processing input line:", loooog);
-		
         new_input_entered = 1;
 
-        if (current_input_mode == mode_menu)
-        { 
-            if (_stricmp(ln, "HELP") == 0) help();
-            else if (_stricmp(ln, "USAGE") == 0) print_usage();
-            else if (_stricmp(ln, "EXIT") == 0) action = action_exit;
-            else if (_stricmp(ln, "M-") == 0) autosweep = 0;
-            else if (!ready_to_receive_command) printf("!not ready, try again later (%s)\n", ln);
-            else if (_strnicmp(ln, "CONNECT", 7) == 0)
-            {
-                action = action_connect;
-                if ((strlen(ln) > 7) && (ln[8] >= '0') && (ln[8] <= '9'))
-                    sscanf(ln + 8, "%d", &cmdline_a);
-            }
-            else if (_stricmp(ln, "DISCONNECT") == 0) action = action_disconnect;
-            else if (_stricmp(ln, "S11") == 0) cmdline_s11 = 1;
-            else if (_stricmp(ln, "S21") == 0) cmdline_s21 = 1;
-            else if (_stricmp(ln, "S12") == 0) cmdline_s12 = 1;
-            else if (_stricmp(ln, "S22") == 0) cmdline_s22 = 1;
-            else if (_stricmp(ln, "ALL") == 0) cmdline_s11 = cmdline_s21 = cmdline_s12 = cmdline_s22 = 1;
-            else if (_stricmp(ln, "CLEAR") == 0) cmdline_s11 = cmdline_s21 = cmdline_s12 = cmdline_s22 = 0;
-            else if (_strnicmp(ln, "FORM", 4) == 0) set_sending_format(ln[4]);
-            else if (_strnicmp(ln, "FMT", 3) == 0) set_format(ln);
-            else if (_strnicmp(ln, "FREQ", 4) == 0) set_freq_format(ln);
-            else if (_strnicmp(ln, "FILE", 4) == 0) set_file();
-            else if (_stricmp(ln, "MEASURE") == 0) action = action_sweep;
-            else if (_stricmp(ln, "M+") == 0) { autosweep = 1; action = action_sweep; }
-            else if (_stricmp(ln, "GETSTATE") == 0) action = action_getstate;
-            else if (_stricmp(ln, "SETSTATE") == 0) { action = action_setstate; current_input_mode = mode_input_blocked; }
-            else if (_stricmp(ln, "GETCALIB") == 0) action = action_getcalib;
-            else if (_stricmp(ln, "SETCALIB") == 0) { action = action_setcalib; current_input_mode = mode_input_blocked; }
-            else if (_stricmp(ln, "RESET") == 0) action = action_reset;
-            else if (_stricmp(ln, "FACTRESET") == 0) action = action_freset;
-            else if (_stricmp(ln, "CMD") == 0) current_input_mode = mode_cmd;
-            else printf("!unknown command %s\n", ln);    
-            fflush(stdout);
-        }
+        log_session("!>", ln);
+
+        if (_stricmp(ln, "HELP") == 0) help();
+        else if (_stricmp(ln, "USAGE") == 0) print_usage();
+        else if (_stricmp(ln, "EXIT") == 0) { running = 0; break; }
+        else if (_stricmp(ln, "LOGON") == 0) session_logging = 1; 
+        else if (_stricmp(ln, "LOGOFF") == 0) session_logging = 0; 
+        else if (_stricmp(ln, "M-") == 0) autosweep = 0;
+        else if (current_input_mode == mode_menu)
+            parse_end_enqueue_menu_action(ln);
         else if (current_input_mode == mode_cmd)
-        {
-            if (ln[0] == '.') current_input_mode = mode_menu;
-            else if (!ready_to_receive_command) printf("!not ready, try again later (%s)\n", ln);
-            else if ((ln[0] == 's') && (strlen(ln) > 2)) action = action_cmd_puts;
-            else if ((ln[0] == 'q') && (strlen(ln) > 2)) action = action_cmd_query;
-            else if (ln[0] == 'a') action = action_cmd_read_asc;
-            else if (ln[0] == 'c') action = action_cmd_continuous_asc;
-            else if (ln[0] == 'd')
-            {
-                sscanf(ln + 2, "%d", &cmd_read_repeat_count);
-                action = action_cmd_repeated_asc;
-            }
-            else if (ln[0] == 'b') action = action_cmd_read_bin;
-            else if (ln[0] == '?') action = action_cmd_status;
-        }
+            parse_end_enqueue_cmd_action(ln);
+    } while (running);
 
-        if (action != action_none)
-        {
-            ready_to_receive_command = 0;
-            if (!SetEvent(action_event))
-            {
-                printf("SetEvent failed (%d)\n", GetLastError());
-                exit(1);
-            }
-        }
-
-    } while (action != action_exit);
     if (connected)
     {
         printf("!auto disconnect before exit\n");
         fflush(stdout);
-        if (ready_to_receive_command) disconnect();
+        if (gpib_trylock()) disconnect();
     }
     exit(0);
 }
 
 void create_event_and_thread()
 {
+    aq_wp = 0;
+    aq_rp = 0;
+
     action_event = CreateEvent(
         NULL,               // default security attributes
         FALSE,               // auto-reset event
@@ -1536,20 +1892,6 @@ void create_event_and_thread()
     );
 
     if (action_event == NULL)
-    {
-        printf("CreateEvent failed (%d)\n", GetLastError());
-        fflush(stdout);
-        exit(1);
-    }
-
-    end_of_input_event = CreateEvent(
-        NULL,               // default security attributes
-        FALSE,              // auto-reset event
-        FALSE,              // initial state is nonsignaled
-        0                   // no event object name
-    );
-
-    if (end_of_input_event == NULL)
     {
         printf("CreateEvent failed (%d)\n", GetLastError());
         fflush(stdout);
@@ -1565,6 +1907,18 @@ void create_event_and_thread()
     if (aq_lock == NULL)
     {
         printf("CreateMutex failed (%d)\n", GetLastError());
+        fflush(stdout);
+        exit(1);
+    }
+
+    gpib_mutex = CreateMutex(
+        NULL,              // default security attributes
+        FALSE,             // initially not owned
+        NULL);             // unnamed mutex
+
+    if (gpib_lock == NULL)
+    {
+        printf("CreateMutex error: %d\n", GetLastError());
         fflush(stdout);
         exit(1);
     }
@@ -1585,76 +1939,46 @@ void create_event_and_thread()
     }
 }
 
-#define MAX_LN_COPY_CHARS 100
 void main_action_loop()
 {
-    static char ln_copy[MAX_LN_COPY_CHARS + 1];
-
     while (running)
     {
-        DWORD event = WaitForSingleObject(
-            action_event, // event handle
-            INFINITE);    // indefinite wait
-        
-        if (event != WAIT_OBJECT_0)
+        DWORD dwWaitResult = WaitForSingleObject(aq_lock, INFINITE);
+        if (dwWaitResult != WAIT_OBJECT_0) 
         {
             printf("Wait error (%d)\n", GetLastError());
             fflush(stdout);
             exit(1);
         }
 
-        action_type requested_action = action;
-        strncpy(ln_copy, ln, MAX_LN_COPY_CHARS);
-        ln_copy[MAX_LN_COPY_CHARS] = 0;
-
-        action = action_none;
-
-        switch (requested_action)
+        if (aq_rp == aq_wp)
         {
-        case action_connect: connect();
-            break;
-        case action_disconnect: disconnect();
-            break;
-        case action_sweep: sweep();
-            break;
-        case action_getstate: getstate();
-            break;
-        case action_setstate: setstate();
-            if (!SetEvent(end_of_input_event))
+            ReleaseMutex(aq_lock);
+            DWORD event = WaitForSingleObject(
+                action_event, // event handle
+                INFINITE);    // indefinite wait
+
+            if (event != WAIT_OBJECT_0)
             {
-                printf("SetEvent failed (%d)\n", GetLastError());
+                printf("Wait error (%d)\n", GetLastError());
                 fflush(stdout);
                 exit(1);
             }
-            break;
-        case action_getcalib: getcalib();
-            break;
-        case action_setcalib: setcalib();
-            if (!SetEvent(end_of_input_event))
+            DWORD dwWaitResult = WaitForSingleObject(aq_lock, INFINITE);
+            if (dwWaitResult != WAIT_OBJECT_0)
             {
-                printf("SetEvent failed (%d)\n", GetLastError());
+                printf("Wait error (%d)\n", GetLastError());
                 fflush(stdout);
                 exit(1);
             }
-            break;
-        case action_cmd_puts: 
-        case action_cmd_status: 
-        case action_cmd_query:
-        case action_cmd_read_asc:
-        case action_cmd_continuous_asc:
-        case action_cmd_repeated_asc:
-        case action_cmd_read_bin:
-            direct_command(requested_action, ln_copy + 2);
-            break;
-        case action_exit: running = 0;
-            break;
-        case action_reset: reset();
-            break;
-        case action_freset: factory_reset();
-            break;
-        }
-        //printf("!ok\n");
-        ready_to_receive_command = 1;
+        }        
+
+        char *aa;
+        action_type requested_action = dequeue_action(&aa);
+        ReleaseMutex(aq_lock);
+
+        if (requested_action != action_none)
+            perform_action(requested_action, aa);
     }
 }
 
@@ -1663,7 +1987,8 @@ void interactive()
     create_event_and_thread();
     main_action_loop();
     CloseHandle(action_event);
-    CloseHandle(end_of_input_event);
+    CloseHandle(aq_lock);
+    CloseHandle(gpib_mutex);
 }
 
 const char* test1argv[] = { "hpctrl", "-a", "16", "-s11", "-s12", "-s21", "-s22" };
@@ -1672,8 +1997,8 @@ const char* test2argv[] = { "hpctrl", "-a", "19", "-i" };
 int test1argc = 7;
 int test2argc = 4;
 
-int runtest = 2;
-//int runtest = 0;
+//int runtest = 2;
+int runtest = 0;
 
 int main(int argc, char** argv)
 {
