@@ -20,16 +20,31 @@
 
 #define ACTION_QUEUE_SIZE 256
 
-#define SESSION_LOGGING
+int session_logging = 0;
 
-//DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
-void log_session(const char *a, const char *b)
+C8* timestamp(void);
+
+void log_session(const char* a, const char* b)
 {
-#ifdef SESSION_LOGGING
-    FILE* f = fopen("log_session.txt", "a+");
-    fprintf(f, "%s %s\n", a, b);
-    fclose(f);
-#endif
+    if (session_logging)
+    {
+        FILE* f = fopen("log_session.txt", "a+");
+        const char* logmsg = b + strlen(b) - 1;
+        char* logm = 0;
+        if ((*logmsg == '\n') || (*logmsg == '\r'))
+        {
+            char* logm = (char*)malloc(strlen(b) + 1);
+            strcpy(logm, b);
+            logmsg = logm;
+            logm += strlen(logm) - 1;
+            while ((logm > logmsg) && ((*logm == '\n') || (*logm == '\r')))
+                *(logm--) = 0;
+        }
+        else logmsg = b;
+        fprintf(f, "%s %s '%s'\n", timestamp(), a, logmsg);
+        fclose(f);
+        if (logm != 0) free(logm);
+    }
 }
 
 static int cmdline_i = 0;
@@ -263,16 +278,20 @@ void instrument_setup(bool debug_mode = TRUE)
 {
     if (debug_mode)
     {
+        log_session("p>", "DEBUON;");
         GPIB_printf("DEBUON;");
     }
 
+    log_session("q>", "OUTPIDEN");
     C8* data = GPIB_query("OUTPIDEN");
     _snprintf(instrument_name, sizeof(instrument_name) - 1, "%s", data);
     instrument_name[sizeof(instrument_name) - 1] = 0;
+    log_session("q:", instrument_name);
     if (strlen(instrument_name) > 0)
         if (instrument_name[strlen(instrument_name) - 1] == '\n')
             instrument_name[strlen(instrument_name) - 1] = 0;
     //printf("instrument name: %s\n", data);   
+    log_session("p>", "HOLD;");
     GPIB_printf("HOLD;");
 }
 
@@ -284,15 +303,35 @@ bool read_complex_trace(const C8* param,
 {
     U8 mask = 0x40;
 
-    if (is_8753()) { GPIB_printf("CLES;SRE 4;ESNB 1;"); mask = 0x40; }  // Extended register bit 0 = SING sweep complete; map it to status bit and enable SRQ on it 
-    if (is_8752()) { GPIB_printf("CLES;SRE 4;ESNB 1;"); mask = 0x40; }
-    if (is_8720()) { GPIB_printf("CLES;SRE 4;ESNB 1;"); mask = 0x40; }
-    if (is_8510()) { GPIB_printf("CLES;");              mask = 0x10; }
+    if (is_8753()) {
+        log_session("p>", "CLES;SRE 4;ESNB 1;");
+        GPIB_printf("CLES;SRE 4;ESNB 1;"); mask = 0x40;
+    }  // Extended register bit 0 = SING sweep complete; map it to status bit and enable SRQ on it 
+    if (is_8752()) {
+        log_session("p>", "CLES;SRE 4;ESNB 1;");
+        GPIB_printf("CLES;SRE 4;ESNB 1;"); mask = 0x40;
+    }
+    if (is_8720()) {
+        log_session("p>", "CLES;SRE 4;ESNB 1;");
+        GPIB_printf("CLES;SRE 4;ESNB 1;"); mask = 0x40;
+    }
+    if (is_8510()) {
+        log_session("p>", "CLES;");
+        GPIB_printf("CLES;");              mask = 0x10;
+    }
 
     if (current_sending_format == form4)
+    {
+        log_session("p>", param);
+        log_session("p>", "FORM4;SING;");
         GPIB_printf("%s;FORM4;SING;", param);
+    }
     else if (current_sending_format == form1)
+    {
+        log_session("p>", param);
+        log_session("p>", "FORM1;SING;");
         GPIB_printf("%s;FORM1;SING;", param);
+    }
 
     if (is_8510())             // Skip first reading to ensure EOS bit is clear, but only on 8510 
     {                       // (SRQ bit auto-resets after the first successful poll on 8753)   
@@ -314,11 +353,24 @@ bool read_complex_trace(const C8* param,
         }
     }
 
-    if (is_8753()) { GPIB_printf("CLES;SRE 0;"); }
-    if (is_8752()) { GPIB_printf("CLES;SRE 0;"); }
-    if (is_8720()) { GPIB_printf("CLES;SRE 0;"); }
-    if (is_8510()) { GPIB_printf("CLES;"); }
+    if (is_8753()) { 
+        log_session("p>", "CLES;SRE 0;");
+        GPIB_printf("CLES;SRE 0;"); 
+    }
+    if (is_8752()) { 
+        log_session("p>", "CLES;SRE 0;");
+        GPIB_printf("CLES;SRE 0;"); 
+    }
+    if (is_8720()) { 
+        log_session("p>", "CLES;SRE 0;");
+        GPIB_printf("CLES;SRE 0;"); 
+    }
+    if (is_8510()) { 
+        log_session("p>", "CLES;");
+        GPIB_printf("CLES;"); 
+    }
 
+    log_session("p>", query);
     GPIB_printf("%s;", query);
 
     if (current_sending_format == form4)
@@ -326,6 +378,7 @@ bool read_complex_trace(const C8* param,
         for (S32 i = 0; i < cnt; i++)
         {
             C8* data = GPIB_read_ASC(-1, FALSE);
+            log_session("a:", data);
 
             DOUBLE I = DBL_MIN;
             DOUBLE Q = DBL_MIN;
@@ -350,12 +403,12 @@ bool read_complex_trace(const C8* param,
 
         S32 actual = 0;
         uint8_t* data = (uint8_t*)GPIB_read_BIN(2, TRUE, FALSE, &actual);
-
         if (actual != 2)
         {
             printf("Error: data header query returned %d bytes", actual);
             return 0;
         }
+        log_session("b:", "...");
 
         if ((data[0] != '#') || (data[1] != 'A'))
         {
@@ -377,6 +430,7 @@ bool read_complex_trace(const C8* param,
             printf("Error: data len returned %d bytes", actual);
             return 0;
         }
+        log_session("b:", "...");
 
         //
         // Get data
@@ -395,6 +449,7 @@ bool read_complex_trace(const C8* param,
             printf("Error: data cnt = %d, cnt*6 = %d, but len = %d", cnt, cnt * 6, len);
             return 0;
         }
+        log_session("b:", "...");
 
         for (int i = 0; i < cnt; i++)
             conv_form1_2_RI(data + 6 * i, &dest[i].real, &dest[i].imag);
@@ -517,14 +572,20 @@ int sweep()
         printf("!not connected\n");
         return 0;
     }
+    log_session("q>", "FORM4;STAR;OUTPACTI;");
     C8* data = GPIB_query("FORM4;STAR;OUTPACTI;");
     sscanf(data, "%lf", &start_Hz);
+    log_session("q:", data);
+    log_session("q>", "STOP;OUTPACTI;");
     data = GPIB_query("STOP;OUTPACTI;");
     sscanf(data, "%lf", &stop_Hz);
+    log_session("q:", data);
 
+    log_session("q>", "POIN;OUTPACTI;");
     data = GPIB_query("POIN;OUTPACTI;");
     DOUBLE fn = 0.0;
     sscanf(data, "%lf", &fn);
+    log_session("q:", data);
     S32 n = (S32)(fn + 0.5);
 
     if ((n < 1) || (n > 1000000))
@@ -580,7 +641,10 @@ int sweep()
 
     if (!is_8510())
     {
-        lin_sweep = (GPIB_query("LINFREQ?;")[0] == '1');
+        log_session("q>", "LINFREQ?;");
+        char* qresp = GPIB_query("LINFREQ?;");
+        lin_sweep = (qresp[0] == '1');
+        log_session("q:", "LINFREQ?;");
     }
 
     if (lin_sweep)
@@ -592,11 +656,13 @@ int sweep()
     }
     else
     {
+        log_session("p>", "OUTPLIML;");
         GPIB_printf("OUTPLIML;");
 
         for (S32 i = 0; i < n_AC_points; i++)
         {
             C8* data = GPIB_read_ASC(-1, FALSE);
+            log_session("a:", data);
 
             DOUBLE f = DBL_MIN;
             sscanf(data, "%lf", &f);
@@ -629,7 +695,10 @@ int sweep()
             C8 text[512] = { 0 };
             _snprintf(text, sizeof(text) - 1, "%s?", param_names[active_param]);
 
-            if (GPIB_query(text)[0] == '1')
+            log_session("q>", text);
+            char* qstr = GPIB_query(text);
+            log_session("q:", qstr);
+            if (qstr[0] == '1')
             {
                 break;
             }
@@ -697,10 +766,12 @@ int sweep()
         &&
         (active_param <= 3))
     {
+        log_session("p>", param_names[active_param]);
         GPIB_printf(param_names[active_param]);
         Sleep(500);
     }
 
+    log_session("p>", "DEBUOFF;CONT;");
     GPIB_printf("DEBUOFF;CONT;");
 
     free(freq_Hz);
@@ -737,6 +808,7 @@ void getcalib()
     }
     Sleep(500);
 
+    log_session("w>", "FORM1;");
     GPIB_write("FORM1;");
 
     if (is_8510())
@@ -754,7 +826,9 @@ void getcalib()
 
         S32 n_types = ARY_CNT(cnts);
 
+        log_session("q>", "CALI?;");
         C8* result = GPIB_query("CALI?;");
+        log_session("q:", result);
         C8* term = strrchr(result, '"');                          // Remove leading and trailing quotes returned by 8510
 
         if (term != NULL)
@@ -768,7 +842,10 @@ void getcalib()
             if (!_stricmp(result, types[i]))
             {
                 active_cal_type = i;
-                active_cal_set = atoi(GPIB_query("CALS?;"));
+                log_session("q>", "CALS?;");
+                char* qstr = GPIB_query("CALS?;");
+                log_session("q:", qstr);
+                active_cal_set = atoi(qstr);
                 break;
             }
         }
@@ -778,7 +855,9 @@ void getcalib()
             const C8* active_cal_name = names[active_cal_type];   // Get name of active calibration type
             S32       n_arrays = cnts[active_cal_type];    // Get # of data arrays for active calibration type
 
+            log_session("q>", "POIN;OUTPACTI;");
             data = (uint8_t*)GPIB_query("POIN;OUTPACTI;");                  // Get # of points in calibrated trace 
+            log_session("q:", (char *)data);
             DOUBLE fnpts = 0.0;
             sscanf((C8*)data, "%lf", &fnpts);
             S32 trace_points = FTOI(fnpts);
@@ -804,9 +883,14 @@ void getcalib()
             {
                 n += array_bytes;
 
-                GPIB_printf("FORM1;OUTPCALC%d%d;", (j + 1) / 10, (j + 1) % 10);
+                char str[30];
+                sprintf(str, "FORM1;OUTPCALC%d%d;", (j + 1) / 10, (j + 1) % 10);
+                log_session("q>", str);
+
+                GPIB_printf(str);
 
                 data = (uint8_t*)GPIB_read_BIN(2);
+                log_session("b:", "...");
 
                 if ((data[0] != '#') || (data[1] != 'A'))
                 {
@@ -825,6 +909,8 @@ void getcalib()
                     printf("Error: OUTPCALC returned %d bytes, expected %d", len, array_bytes);
                     return;
                 }
+                log_session("b:", "...");
+
 
                 U16 N = *(U16*)data;
 
@@ -833,6 +919,7 @@ void getcalib()
                 printf("INPUCALC%d%d;", (j + 1) / 10, (j + 1) % 10);
 
                 C8* IQ = GPIB_read_BIN(array_bytes, TRUE, FALSE, &actual);
+                log_session("b:", "...");
 
                 if (actual != array_bytes)
                 {
@@ -900,10 +987,16 @@ void getcalib()
             n_types--;
         }
 
+        char str[40];
+
         for (S32 i = 0; i < n_types; i++)
         {
-            GPIB_printf("%s?;", types[i]);
+            sprintf(str, "%s?;", types[i]);
+            log_session("p>", str);
+            GPIB_printf(str);
             C8* result = GPIB_read_ASC();
+            log_session("a:", result);
+
 
             if (result[0] == '1')
             {
@@ -917,7 +1010,9 @@ void getcalib()
             const C8* active_cal_name = types[active_cal_type];   // Get name of active calibration type
             S32       n_arrays = cnts[active_cal_type];    // Get # of data arrays for active calibration type
 
+            log_session("q>", "FORM3;POIN?;");
             data = (uint8_t*)GPIB_query("FORM3;POIN?;");                    // Get # of points in calibrated trace
+            log_session("q:", (char *)data);
             DOUBLE fnpts = 0.0;
             sscanf((C8*)data, "%lf", &fnpts);
             S32 trace_points = FTOI(fnpts);
@@ -940,7 +1035,9 @@ void getcalib()
             {
                 n += array_bytes;
 
-                GPIB_printf("FORM1;OUTPCALC%d%d;", (j + 1) / 10, (j + 1) % 10);
+                sprintf(str, "FORM1;OUTPCALC%d%d;", (j + 1) / 10, (j + 1) % 10);
+                log_session("p>", str);
+                GPIB_printf(str);
 
                 data = (uint8_t*)GPIB_read_BIN(2);
 
@@ -962,6 +1059,7 @@ void getcalib()
                     fflush(stdout);
                     return;
                 }
+                log_session("b:", "...");
 
                 U16 N = *(U16*)data;
 
@@ -975,6 +1073,7 @@ void getcalib()
                     fflush(stdout);
                     return;
                 }
+                log_session("b:", "...");
 
                 printf("%d\n", array_bytes);
                 for (int i = 0; i < array_bytes; i++)
@@ -995,6 +1094,7 @@ void getcalib()
     fflush(stdout);
 
     Sleep(500);
+    log_session("p>", "DEBUOFF;CONT;");
     GPIB_printf("DEBUOFF;CONT;");
 }
 
@@ -1019,6 +1119,7 @@ void getstate()
 
     Sleep(500);
 
+    log_session("w>", "FORM1;OUTPLEAS;");
     GPIB_write("FORM1;OUTPLEAS;");
 
     //
@@ -1052,6 +1153,8 @@ void getstate()
 
     actual = 0;
     data = (uint8_t *)GPIB_read_BIN(2, TRUE, FALSE, &actual);
+    log_session("b:", "...");
+
 
     S32 len = S16_BE((C8 *)data);
 
@@ -1070,6 +1173,7 @@ void getstate()
     //
 
     data = (uint8_t *)GPIB_read_BIN(len, TRUE, FALSE, &learn_string_size);
+    log_session("b:", "...");
 
     if (learn_string_size != len)
     {
@@ -1086,6 +1190,7 @@ void getstate()
     fflush(stdout);
 
     Sleep(500);
+    log_session("p>", "DEBUOFF;CONT;");
     GPIB_printf("DEBUOFF;CONT;");
 }
 
@@ -1101,7 +1206,11 @@ void setcalib()
     char active_cal_name[20];
     int n_arrays;
     scanf("%20s\n", active_cal_name);
-    GPIB_printf("CORROFF;FORM1;%s;", active_cal_name);
+
+    char str[40];
+    sprintf(str, "CORROFF;FORM1;%s;", active_cal_name);
+    log_session("p>", str);
+    GPIB_printf(str);
     scanf("%d", &n_arrays);
     for (int i = 0; i < n_arrays; i++)
     {
@@ -1123,9 +1232,11 @@ void setcalib()
             if ((i % 40 == 39) && (i < array_bytes - 1)) scanf("\n");
         }
         
+        log_session("b>", "...");
         GPIB_write_BIN(data, 15 + array_bytes);
         Sleep(250);
 
+        log_session("p>", "CLES;SRE 32;ESE 1;OPC;SAVC;");
         GPIB_printf("CLES;SRE 32;ESE 1;OPC;SAVC;");
 
         S32 st = timeGetTime();
@@ -1139,11 +1250,13 @@ void setcalib()
                 break;
             }
         }
+        log_session("p>", "CLES;SRE 0;");
         GPIB_printf("CLES;SRE 0;");
         free(data);
     }
     Sleep(1500);
-    GPIB_printf("DEBUOFF;CONT;");    
+    log_session("p>", "DEBUOFF;CONT;");
+    GPIB_printf("DEBUOFF;CONT;");
 }
 
 void setstate()
@@ -1190,9 +1303,11 @@ void setstate()
     //scanf("\n");
     //printf("!going to send...\n");
         
+    log_session("b>", "...");
     GPIB_write_BIN(data, length + 19);    
     Sleep(1500);
 
+    log_session("p>", "DEBUOFF;CONT;");
     GPIB_printf("DEBUOFF;CONT;");
     free(data);
 }
@@ -1205,7 +1320,9 @@ void reset()
         fflush(stdout);
         return;
     }
-    GPIB_puts("PRES;");
+
+    log_session("p>", "DEBUOFF;CONT;");
+    GPIB_puts("DEBUOFF;CONT;");
 }
 
 void factory_reset()
@@ -1218,14 +1335,21 @@ void factory_reset()
     }
     if (!is_8510())
     {
+        log_session("p>", "RST;");
         GPIB_puts("RST;");
     }
     else
     {
         if (is_8510C())
+        {
+            log_session("p>", "FACTPRES;");
             GPIB_puts("FACTPRES;");
+        }
         else
+        {
+            log_session("p>", "PRES;");
             GPIB_puts("PRES;");
+        }
     }
 }
 
@@ -1256,16 +1380,20 @@ void direct_command(action_type requested_action, const char *action_argument)
     {
     case action_cmd_puts:
         //DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
-	    log_session("! GPIB_puts: '", action_argument);
+	    log_session("s>", action_argument);
         GPIB_puts(action_argument);
         break;
     case action_cmd_query:
+        log_session("q>", action_argument);
         response = GPIB_query(action_argument);
+        log_session("q:", response);
         printf("%s", response);
         fflush(stdout);
         break;
     case action_cmd_read_asc:
-        data = (uint8_t *)GPIB_read_ASC();        
+        data = (uint8_t *)GPIB_read_ASC(); 
+        //DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
+        log_session("a:", (const char*)data);
         printf("%s", data);
         fflush(stdout);
         break;
@@ -1276,7 +1404,7 @@ void direct_command(action_type requested_action, const char *action_argument)
             {
                 printf("%s", data);
                 fflush(stdout);
-                log_session("arrived new read_ASC", (const char *)data);
+                log_session("c:", (const char *)data);
             }
             else Sleep(1);
         } while (!new_input_entered);
@@ -1291,12 +1419,14 @@ void direct_command(action_type requested_action, const char *action_argument)
             {
                 printf("%s", data);
                 fflush(stdout);
+                log_session("d:", (const char*)data);
             }
             else Sleep(1);
         } 
         break;
     case action_cmd_read_bin:
         data = (uint8_t*)GPIB_read_BIN();
+        log_session("b:", "...");
         if ((data[0] != '#') || (data[1] != 'A'))
         {
             printf("!header not received\n");
@@ -1313,6 +1443,9 @@ void direct_command(action_type requested_action, const char *action_argument)
         S32 status = GPIB_status();            
         printf("%d\n", status);
         fflush(stdout);
+        char status_str[20];
+        sprintf(status_str, "%d", status);
+        log_session("?:", status_str);
         break;
     } 
 }
@@ -1360,6 +1493,8 @@ void help()
     printf("             ?      ... read and print status\n");
     printf("             .      ... leave direct command mode\n");
     printf("         HELP       ... print this help\n");
+    printf("         LOGON      ... turn on session logging to log_session.txt\n");
+    printf("         LOGOFF     ... turn off session logging (default)\n");
     printf("         EXIT       ... terminate the application\n");
     fflush(stdout);
 }
@@ -1427,7 +1562,9 @@ void perform_action(action_type action, char *action_argument)
 {
     switch (action)
     {
-    case action_connect: connect(); break;
+    case action_connect: if (action_argument) sscanf(action_argument, "%d", &cmdline_a);
+                         connect(); 
+                         break;
     case action_disconnect: disconnect(); break;
     case action_s11: cmdline_s11 = 1; break;
     case action_s12: cmdline_s12 = 1; break;
@@ -1566,14 +1703,13 @@ DWORD WINAPI interactive_thread(LPVOID arg)
         if (strlen(ln) == 0) continue;
         new_input_entered = 1;
 
-        //DDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDDD
-        char loooog[1000];
-        sprintf(loooog, "'%s', len=%d, stricmp:%d", ln, strlen(ln), _stricmp("CMD", ln));
-        log_session("! processing input line:", loooog);
+        log_session("!>", ln);
 
         if (_stricmp(ln, "HELP") == 0) help();
         else if (_stricmp(ln, "USAGE") == 0) print_usage();
         else if (_stricmp(ln, "EXIT") == 0) { running = 0; break; }
+        else if (_stricmp(ln, "LOGON") == 0) session_logging = 1; 
+        else if (_stricmp(ln, "LOGOFF") == 0) session_logging = 0; 
         else if (_stricmp(ln, "M-") == 0) autosweep = 0;
         else if (current_input_mode == mode_menu)
             parse_end_enqueue_menu_action(ln);
@@ -1695,8 +1831,8 @@ const char* test2argv[] = { "hpctrl", "-a", "19", "-i" };
 int test1argc = 7;
 int test2argc = 4;
 
-int runtest = 2;
-//int runtest = 0;
+//int runtest = 2;
+int runtest = 0;
 
 int main(int argc, char** argv)
 {
