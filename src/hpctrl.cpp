@@ -1831,8 +1831,8 @@ const char* test2argv[] = { "hpctrl", "-a", "19", "-i" };
 int test1argc = 7;
 int test2argc = 4;
 
-int runtest = 2;
-//int runtest = 0;
+//int runtest = 2;
+int runtest = 0;
 
 int main(int argc, char** argv)
 {
