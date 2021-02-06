@@ -301,12 +301,14 @@ void instrument_setup(bool debug_mode = TRUE)
     if (debug_mode)
     {
         log_session("p>", "DEBUON;");
+
         gpib_lock();
         GPIB_printf("DEBUON;");
         gpib_unlock();
     }
 
     log_session("q>", "OUTPIDEN");
+
     gpib_lock();
     C8* data = GPIB_query("OUTPIDEN");
     gpib_unlock();
@@ -318,6 +320,7 @@ void instrument_setup(bool debug_mode = TRUE)
             instrument_name[strlen(instrument_name) - 1] = 0;
     //printf("instrument name: %s\n", data);   
     log_session("p>", "HOLD;");
+
     gpib_lock();
     GPIB_printf("HOLD;");
     gpib_unlock();
@@ -644,6 +647,7 @@ int sweep()
     log_session("q:", data);
 
     log_session("q>", "POIN;OUTPACTI;");
+
     gpib_lock();
     data = GPIB_query("POIN;OUTPACTI;");
     gpib_unlock();
@@ -710,7 +714,7 @@ int sweep()
         char* qresp = GPIB_query("LINFREQ?;");
         gpib_unlock();
         lin_sweep = (qresp[0] == '1');
-        log_session("q:", "LINFREQ?;");
+        log_session("q:", qresp);
     }
 
     if (lin_sweep)
@@ -970,11 +974,11 @@ void getcalib()
                 char str[30];
                 sprintf(str, "FORM1;OUTPCALC%d%d;", (j + 1) / 10, (j + 1) % 10);
                 log_session("q>", str);
-
                 gpib_lock();
                 GPIB_printf(str);
                 data = (uint8_t*)GPIB_read_BIN(2);
                 gpib_unlock();
+
                 log_session("b:", "...");
 
                 if ((data[0] != '#') || (data[1] != 'A'))
@@ -1083,9 +1087,11 @@ void getcalib()
             sprintf(str, "%s?;", types[i]);
             log_session("p>", str);
             GPIB_printf(str);
+
             gpib_lock();
             C8* result = GPIB_read_ASC();
             gpib_unlock();
+
             log_session("a:", result);
 
 
@@ -1102,9 +1108,11 @@ void getcalib()
             S32       n_arrays = cnts[active_cal_type];    // Get # of data arrays for active calibration type
 
             log_session("q>", "FORM3;POIN?;");
+
             gpib_lock();
             data = (uint8_t*)GPIB_query("FORM3;POIN?;");                    // Get # of points in calibrated trace
             gpib_unlock();
+
             log_session("q:", (char *)data);
             DOUBLE fnpts = 0.0;
             sscanf((C8*)data, "%lf", &fnpts);
@@ -1132,7 +1140,6 @@ void getcalib()
                 log_session("p>", str);
                 gpib_lock();
                 GPIB_printf(str);
-
                 data = (uint8_t*)GPIB_read_BIN(2);
                 gpib_unlock();
 
@@ -1194,6 +1201,7 @@ void getcalib()
 
     Sleep(500);
     log_session("p>", "DEBUOFF;CONT;");
+
     gpib_lock();
     GPIB_printf("DEBUOFF;CONT;");
     gpib_unlock();
@@ -1224,7 +1232,6 @@ void getstate()
     log_session("w>", "FORM1;OUTPLEAS;");
     gpib_lock();
     GPIB_write("FORM1;OUTPLEAS;");
-
 
     //
     // Verify its header 
@@ -1260,9 +1267,9 @@ void getstate()
     actual = 0;
     gpib_lock();
     data = (uint8_t *)GPIB_read_BIN(2, TRUE, FALSE, &actual);
+
     gpib_unlock();
     log_session("b:", "...");
-
 
     S32 len = S16_BE((C8 *)data);
 
@@ -1282,6 +1289,7 @@ void getstate()
 
     gpib_lock();
     data = (uint8_t *)GPIB_read_BIN(len, TRUE, FALSE, &learn_string_size);
+
     gpib_unlock();
     log_session("b:", "...");
 
@@ -1322,6 +1330,7 @@ void setcalib()
     char str[40];
     sprintf(str, "CORROFF;FORM1;%s;", active_cal_name);
     log_session("p>", str);
+
     gpib_lock();
     GPIB_printf(str);
     gpib_unlock();
@@ -1355,6 +1364,7 @@ void setcalib()
         Sleep(250);
 
         log_session("p>", "CLES;SRE 32;ESE 1;OPC;SAVC;");
+
         gpib_lock();
         GPIB_printf("CLES;SRE 32;ESE 1;OPC;SAVC;");
         gpib_unlock();
@@ -1374,6 +1384,7 @@ void setcalib()
             }
         }
         log_session("p>", "CLES;SRE 0;");
+
         gpib_lock();
         GPIB_printf("CLES;SRE 0;");
         gpib_unlock();
