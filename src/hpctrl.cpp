@@ -78,14 +78,14 @@ static char ln[52];
 enum action_type {
     action_none, action_connect, action_disconnect, action_sweep, action_getstate, action_setstate,
     action_getcalib, action_setcalib, action_cmd_puts, action_cmd_query, action_cmd_status, action_cmd_read_asc,
-    action_cmd_continuous_asc, action_cmd_repeated_asc, action_cmd_read_bin, action_exit, action_reset, action_freset,
+    action_cmd_continuous_asc, action_cmd_cancel_continuous_asc, action_cmd_repeated_asc, action_cmd_read_bin, action_exit, action_reset, action_freset,
     action_s11, action_s12, action_s21, action_s22, action_all, action_clear, action_form, action_fmt, action_freq,
     action_file, action_autosweep
 };
 
 static action_type action_queue[ACTION_QUEUE_SIZE];
 static char* action_arguments[ACTION_QUEUE_SIZE];
-static int aq_wp, aq_rp;
+static volatile int aq_wp, aq_rp;
 static HANDLE aq_lock;
 
 static volatile action_type action;
@@ -624,6 +624,7 @@ void save_file(FILE *of, const char *fname)
         if (cmdline_s22) output_complex_value(of, S22 + i);
         fprintf(of, "\n");
     }
+    fflush(of);
 }
 
 int sweep()
@@ -1126,6 +1127,8 @@ void getcalib()
             //printf("CORROFF;FORM1;%s;", active_cal_name);
             printf("%s\n", active_cal_name);
             printf("%d\n", n_arrays);
+            fflush(stdout);
+
             //
             // For each array....
             // 
@@ -1188,6 +1191,7 @@ void getcalib()
                     if ((i % 40 == 39) && (i < array_bytes - 1)) printf("\n");
                 }
                 printf("\n");
+                fflush(stdout);
             }
 
             assert(n == total_bytes);
@@ -1304,7 +1308,7 @@ void getstate()
         printf("%02x", data[i]);
         if ((i % 40 == 39) && (i < learn_string_size - 1)) printf("\n");
     }
-    printf("\n");
+    printf("\n\n");
     fflush(stdout);
 
     Sleep(500);
@@ -1377,11 +1381,7 @@ void setcalib()
             U8 result = GPIB_serial_poll();
             gpib_unlock();
 
-            if (result & 0x40)
-            {
-                printf("!Complete in %d ms\n", timeGetTime() - st);
-                break;
-            }
+            if (result & 0x40) break;            
         }
         log_session("p>", "CLES;SRE 0;");
 
@@ -1566,7 +1566,9 @@ void direct_command(action_type requested_action, const char *action_argument)
                 log_session("c:", (const char *)data);
             }
             else Sleep(1);
-        } while (!new_input_entered);
+        } while (aq_wp == aq_rp);
+        break;
+    case action_cmd_cancel_continuous_asc:
         break;
     case action_cmd_repeated_asc:
         sscanf(action_argument, "%d", &cmd_read_repeat_count);
@@ -1808,6 +1810,7 @@ void parse_end_enqueue_cmd_action(char* ln)
     else if ((ln[0] == 'q') && (strlen(ln) > 2)) enqueue_action(action_cmd_query, ln + 2);
     else if (ln[0] == 'a') enqueue_action(action_cmd_read_asc, ln + 2);
     else if (ln[0] == 'c') enqueue_action(action_cmd_continuous_asc, ln + 2);
+    else if (ln[0] == 'n') enqueue_action(action_cmd_cancel_continuous_asc, ln + 2);
     else if (ln[0] == 'd') enqueue_action(action_cmd_repeated_asc, ln + 2);
     else if (ln[0] == 'b') enqueue_action(action_cmd_read_bin, 0); 
     else if (ln[0] == '?') enqueue_action(action_cmd_status, 0);
