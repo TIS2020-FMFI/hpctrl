@@ -1,5 +1,5 @@
 // hpctrl.cpp: simple command-line utility
-// to communicate with HP8753 and HP4191 over GPIB USB device
+// to communicate with HP8753, HP4191, and HP83480A over GPIB USB device
 // it is based on the vna.cpp from John Miles, KE5FX 
 //  http://www.ke5fx.com/gpib/readme.htm
 // and depends on gpiblib.dll
@@ -57,6 +57,7 @@ static int cmdline_s22 = 0;
 
 static volatile int running = 1;
 static volatile int autosweep = 0;
+static int osci = 0;
 static char *save_file_name = 0;
 
 enum sending_format { form1, form4 };
@@ -80,7 +81,7 @@ enum action_type {
     action_getcalib, action_setcalib, action_cmd_puts, action_cmd_query, action_cmd_status, action_cmd_read_asc,
     action_cmd_continuous_asc, action_cmd_cancel_continuous_asc, action_cmd_repeated_asc, action_cmd_read_bin, action_exit, action_reset, action_freset,
     action_s11, action_s12, action_s21, action_s22, action_all, action_clear, action_form, action_fmt, action_freq,
-    action_file, action_autosweep
+    action_file, action_autosweep, action_osci
 };
 
 static action_type action_queue[ACTION_QUEUE_SIZE];
@@ -533,7 +534,7 @@ int connect()
 {
     if (connected) return 1;
     S32 addr = cmdline_a;
-    
+
     GPIB_connect(addr,       // device_address
         GPIB_error, // handler
         FALSE,      // clear
@@ -545,7 +546,8 @@ int connect()
     
     GPIB_set_EOS_mode(10);
     GPIB_set_serial_read_dropout(10000);
-    instrument_setup();
+    if (!osci)
+        instrument_setup();
 
     connected = 1;
     return 1;
@@ -1632,6 +1634,7 @@ void help()
 {
     printf("         CONNECT    ... connect to the device\n");
     printf("         DISCONNECT ... disconnect the device\n");
+    printf("         OSCI       ... disable instrument setup (do it for 83480A & similar)\n");
     printf("         S11 .. S22 ... configure (add) a channel for measurement\n");
     printf("         ALL        ... configure measurement of all 4 channels\n");
     printf("         CLEAR      ... reset measurement config to no channels\n");
@@ -1732,6 +1735,7 @@ void perform_action(action_type action, char *action_argument)
                          connect(); 
                          break;
     case action_disconnect: disconnect(); break;
+    case action_osci: osci = 1; break;
     case action_s11: cmdline_s11 = 1; break;
     case action_s12: cmdline_s12 = 1; break;
     case action_s21: cmdline_s21 = 1; break;
@@ -1825,6 +1829,7 @@ void parse_end_enqueue_menu_action(char* ln)
         else enqueue_action(action_connect, 0);
     }
     else if (_stricmp(ln, "DISCONNECT") == 0) enqueue_action(action_disconnect, 0);
+    else if (_stricmp(ln, "OSCI") == 0) enqueue_action(action_osci, 0);
     else if (_stricmp(ln, "S11") == 0) enqueue_action(action_s11, 0);
     else if (_stricmp(ln, "S21") == 0) enqueue_action(action_s21, 0);
     else if (_stricmp(ln, "S12") == 0) enqueue_action(action_s12, 0);
