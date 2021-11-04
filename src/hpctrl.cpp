@@ -81,7 +81,7 @@ enum action_type {
     action_getcalib, action_setcalib, action_cmd_puts, action_cmd_query, action_cmd_status, action_cmd_read_asc,
     action_cmd_continuous_asc, action_cmd_cancel_continuous_asc, action_cmd_repeated_asc, action_cmd_read_bin, action_exit, action_reset, action_freset,
     action_s11, action_s12, action_s21, action_s22, action_all, action_clear, action_form, action_fmt, action_freq,
-    action_file, action_autosweep, action_osci
+    action_file, action_autosweep, action_osci, action_cmd_read_oscibin
 };
 
 static action_type action_queue[ACTION_QUEUE_SIZE];
@@ -1518,7 +1518,7 @@ void direct_command(action_type requested_action, const char *action_argument)
     // ?          - print status
     // .          - exit direct command mode
     uint8_t* data;
-    int len;
+    int len, digits;
     char* response = 0;
 
     if (!connected)
@@ -1588,6 +1588,30 @@ void direct_command(action_type requested_action, const char *action_argument)
             }
             else Sleep(1);
         } 
+        break;
+    case action_cmd_read_oscibin:
+        gpib_lock();
+        data = (uint8_t*)GPIB_read_BIN();
+        gpib_unlock();
+        log_session("i:", "...");
+        if (data[0] != '#')
+        {
+            printf("!header not received\n");
+            fflush(stdout);
+            break;
+        }
+        digits = data[1] - '0';
+        len = 0;
+        for (int i = 0; i < digits; i++)
+            len = len * 10 + data[i + 2] - '0';
+        printf("%d\n", len);
+        for (int i = 0; i < len + digits + 2; i++)
+        {
+            if ((i % 32 == 0) && (i > 0)) printf("\n");
+            printf("%02x", data[i]);
+        }
+        printf("\n");
+        fflush(stdout);
         break;
     case action_cmd_read_bin:
         gpib_lock();
@@ -1759,6 +1783,7 @@ void perform_action(action_type action, char *action_argument)
     case action_cmd_continuous_asc:
     case action_cmd_repeated_asc:
     case action_cmd_read_bin:
+    case action_cmd_read_oscibin:
         direct_command(action, action_argument);
         break;
     case action_reset: reset(); break;
@@ -1817,6 +1842,7 @@ void parse_end_enqueue_cmd_action(char* ln)
     else if (ln[0] == 'n') enqueue_action(action_cmd_cancel_continuous_asc, ln + 2);
     else if (ln[0] == 'd') enqueue_action(action_cmd_repeated_asc, ln + 2);
     else if (ln[0] == 'b') enqueue_action(action_cmd_read_bin, 0); 
+    else if (ln[0] == 'i') enqueue_action(action_cmd_read_oscibin, 0);
     else if (ln[0] == '?') enqueue_action(action_cmd_status, 0);
 }
 
