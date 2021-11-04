@@ -81,7 +81,7 @@ enum action_type {
     action_getcalib, action_setcalib, action_cmd_puts, action_cmd_query, action_cmd_status, action_cmd_read_asc,
     action_cmd_continuous_asc, action_cmd_cancel_continuous_asc, action_cmd_repeated_asc, action_cmd_read_bin, action_exit, action_reset, action_freset,
     action_s11, action_s12, action_s21, action_s22, action_all, action_clear, action_form, action_fmt, action_freq,
-    action_file, action_autosweep, action_osci, action_cmd_read_oscibin
+    action_file, action_autosweep, action_osci, action_cmd_read_oscibin, action_cmd_read_8oscibin, action_cmd_read_16oscibin
 };
 
 static action_type action_queue[ACTION_QUEUE_SIZE];
@@ -1518,7 +1518,7 @@ void direct_command(action_type requested_action, const char *action_argument)
     // ?          - print status
     // .          - exit direct command mode
     uint8_t* data;
-    int len, digits;
+    int len, digits, i;
     char* response = 0;
 
     if (!connected)
@@ -1589,6 +1589,8 @@ void direct_command(action_type requested_action, const char *action_argument)
             else Sleep(1);
         } 
         break;
+    case action_cmd_read_8oscibin:
+    case action_cmd_read_16oscibin:
     case action_cmd_read_oscibin:
         gpib_lock();
         data = (uint8_t*)GPIB_read_BIN();
@@ -1605,12 +1607,27 @@ void direct_command(action_type requested_action, const char *action_argument)
         for (int i = 0; i < digits; i++)
             len = len * 10 + data[i + 2] - '0';
         printf("%d\n", len);
-        for (int i = 0; i < len + digits + 2; i++)
-        {
-            if ((i % 32 == 0) && (i > 0)) printf("\n");
-            printf("%02x", data[i]);
+        i = 0;
+        if (requested_action != action_cmd_read_oscibin)
+            i += digits + 2;
+        for (; i < len + digits + 2; i++)
+        {            
+            switch (requested_action) {
+                case action_cmd_read_oscibin: 
+                    if ((i % 32 == 0) && (i > 0)) printf("\n");
+                    printf("%02x", data[i]);
+                    break;
+                case action_cmd_read_8oscibin:
+                    printf("%hhd\n", data[i]);
+                    break;
+                case action_cmd_read_16oscibin:
+                    // assuming the default MSBFirst byte order
+                    printf("%hd\n", (data[i] << 8) + data[i + 1]);
+                    i++;
+                    break;
+            }
         }
-        printf("\n");
+        if (requested_action == action_cmd_read_oscibin) printf("\n");
         fflush(stdout);
         break;
     case action_cmd_read_bin:
@@ -1784,6 +1801,8 @@ void perform_action(action_type action, char *action_argument)
     case action_cmd_repeated_asc:
     case action_cmd_read_bin:
     case action_cmd_read_oscibin:
+    case action_cmd_read_8oscibin:
+    case action_cmd_read_16oscibin:
         direct_command(action, action_argument);
         break;
     case action_reset: reset(); break;
@@ -1843,6 +1862,8 @@ void parse_end_enqueue_cmd_action(char* ln)
     else if (ln[0] == 'd') enqueue_action(action_cmd_repeated_asc, ln + 2);
     else if (ln[0] == 'b') enqueue_action(action_cmd_read_bin, 0); 
     else if (ln[0] == 'i') enqueue_action(action_cmd_read_oscibin, 0);
+    else if (ln[0] == '8') enqueue_action(action_cmd_read_8oscibin, 0);
+    else if ((ln[0] == '1') && (ln[1] == '6')) enqueue_action(action_cmd_read_16oscibin, 0);
     else if (ln[0] == '?') enqueue_action(action_cmd_status, 0);
 }
 
