@@ -7,6 +7,7 @@
 // the code is quite dirty, sorry.
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <inttypes.h>
 #include <malloc.h>
 #include <float.h>
@@ -19,6 +20,9 @@
 #define FTOI(x) (S32((x)+0.5))
 
 #define ACTION_QUEUE_SIZE 256
+
+#define MAXBUFFERSIZE 1000000000  // 1GB buffer for continuous read
+#define MAX_OSCI_POINTS 4096
 
 int session_logging = 0;
 HANDLE gpib_mutex;
@@ -74,14 +78,18 @@ enum input_mode { mode_menu, mode_cmd, mode_input_blocked };
 static volatile input_mode current_input_mode = mode_menu;
 static volatile int new_input_entered;
 
+static int ch_selected[4];
+
 static char ln[52];
+
 
 enum action_type {
     action_none, action_connect, action_disconnect, action_sweep, action_getstate, action_setstate,
     action_getcalib, action_setcalib, action_cmd_puts, action_cmd_query, action_cmd_status, action_cmd_read_asc,
     action_cmd_continuous_asc, action_cmd_cancel_continuous_asc, action_cmd_repeated_asc, action_cmd_read_bin, action_exit, action_reset, action_freset,
     action_s11, action_s12, action_s21, action_s22, action_all, action_clear, action_form, action_fmt, action_freq,
-    action_file, action_autosweep, action_osci, action_cmd_read_oscibin, action_cmd_read_8oscibin, action_cmd_read_16oscibin
+    action_file, action_autosweep, action_osci, action_cmd_read_oscibin, action_cmd_read_8oscibin, action_cmd_read_16oscibin, action_cmd_continuous_16,
+    action_cmd_select_channels
 };
 
 static action_type action_queue[ACTION_QUEUE_SIZE];
@@ -91,14 +99,14 @@ static HANDLE aq_lock;
 
 static volatile action_type action;
 static int cmd_read_repeat_count;
-
+static int configured_delay = 120;
 
 HANDLE action_event;
 
 
 void WINAPI GPIB_error(C8* msg, S32 ibsta, S32 iberr, S32 ibcntl)
 {
-    printf("GPIB Error %s, ibsta=%d, iberr=%d, ibcntl=%d\n", msg, ibsta, iberr, ibcntl);
+    printf("!GPIB Error %s, ibsta=%d, iberr=%d, ibcntl=%d\n", msg, ibsta, iberr, ibcntl);
     exit(1);
 }
 
@@ -114,7 +122,7 @@ void gpib_lock()
 void gpib_unlock()
 {
     if (!ReleaseMutex(gpib_mutex))
-        printf("error releasing mutex: %d\n", GetLastError());
+        printf("!error releasing mutex: %d\n", GetLastError());
 }
 
 int gpib_trylock()
@@ -443,7 +451,7 @@ bool read_complex_trace(const C8* param,
 
             if ((I == DBL_MIN) || (Q == DBL_MIN))
             {
-                printf("Error VNA read timed out reading %s (point %d of %d points)", param, i, cnt);
+                printf("!Error VNA read timed out reading %s (point %d of %d points)", param, i, cnt);
                 return FALSE;
             }
 
@@ -463,14 +471,14 @@ bool read_complex_trace(const C8* param,
         gpib_unlock();
         if (actual != 2)
         {
-            printf("Error: data header query returned %d bytes", actual);
+            printf("!Error: data header query returned %d bytes", actual);
             return 0;
         }
         log_session("b:", "...");
 
         if ((data[0] != '#') || (data[1] != 'A'))
         {
-            printf("Error: data FORM1 block header was 0x%.2X 0x%.2X", data[0], data[1]);
+            printf("!Error: data FORM1 block header was 0x%.2X 0x%.2X", data[0], data[1]);
             return 0;
         }
 
@@ -487,7 +495,7 @@ bool read_complex_trace(const C8* param,
 
         if (actual != 2)
         {
-            printf("Error: data len returned %d bytes", actual);
+            printf("!Error: data len returned %d bytes", actual);
             return 0;
         }
         log_session("b:", "...");
@@ -502,13 +510,13 @@ bool read_complex_trace(const C8* param,
 
         if (actual != len)
         {
-            printf("Error: data len = %d, received %d", len, actual);
+            printf("!Error: data len = %d, received %d", len, actual);
             return 0;
         }
 
         if (len != cnt * 6)
         {
-            printf("Error: data cnt = %d, cnt*6 = %d, but len = %d", cnt, cnt * 6, len);
+            printf("!Error: data cnt = %d, cnt*6 = %d, but len = %d", cnt, cnt * 6, len);
             return 0;
         }
         log_session("b:", "...");
@@ -662,7 +670,7 @@ int sweep()
     if ((n < 1) || (n > 1000000))
     {
         GPIB_disconnect();
-        printf("Error n_points = %d\n", n);
+        printf("!Error n_points = %d\n", n);
         return 0;
     }
 
@@ -746,7 +754,7 @@ int sweep()
 
             if (f == DBL_MIN)
             {
-                printf("Error, VNA read timed out reading OUTPLIML (point %d of %d points)", i, n_AC_points);
+                printf("!Error, VNA read timed out reading OUTPLIML (point %d of %d points)", i, n_AC_points);
                 GPIB_disconnect();
                 return 0;
             }
@@ -955,7 +963,7 @@ void getcalib()
 
             if ((trace_points < 1) || (trace_points > 1000000))
             {
-                printf("Error: trace_points = %d\n", trace_points);
+                printf("!Error: trace_points = %d\n", trace_points);
                 return;
             }
 
@@ -986,7 +994,7 @@ void getcalib()
 
                 if ((data[0] != '#') || (data[1] != 'A'))
                 {
-                    printf("Error: OUTPCALC FORM1 block header was 0x%.2X 0x%.2X", data[0], data[1]);
+                    printf("!Error: OUTPCALC FORM1 block header was 0x%.2X 0x%.2X", data[0], data[1]);
                     return;
                 }
 
@@ -1000,7 +1008,7 @@ void getcalib()
 
                 if (len != array_bytes)
                 {
-                    printf("Error: OUTPCALC returned %d bytes, expected %d", len, array_bytes);
+                    printf("!Error: OUTPCALC returned %d bytes, expected %d", len, array_bytes);
                     return;
                 }
                 log_session("b:", "...");
@@ -1019,7 +1027,7 @@ void getcalib()
 
                 if (actual != array_bytes)
                 {
-                    printf("Error: OUTPCALC%d%d returned %d bytes, expected %d", (j + 1) / 10, (j + 1) % 10, actual, array_bytes);
+                    printf("!Error: OUTPCALC%d%d returned %d bytes, expected %d", (j + 1) / 10, (j + 1) % 10, actual, array_bytes);
                     return;
                 }
 
@@ -1150,7 +1158,7 @@ void getcalib()
 
                 if ((data[0] != '#') || (data[1] != 'A'))
                 {
-                    printf("Error: OUTPCALC FORM1 block header was 0x%.2X 0x%.2X", data[0], data[1]);
+                    printf("!Error: OUTPCALC FORM1 block header was 0x%.2X 0x%.2X", data[0], data[1]);
                     return;
                 }
 
@@ -1164,7 +1172,7 @@ void getcalib()
 
                 if (len != array_bytes)
                 {
-                    printf("Error: OUTPCALC returned %d bytes, expected %d", len, array_bytes);
+                    printf("!Error: OUTPCALC returned %d bytes, expected %d", len, array_bytes);
                     fflush(stdout);
                     return;
                 }
@@ -1180,7 +1188,7 @@ void getcalib()
 
                 if (actual != array_bytes)
                 {
-                    printf("Error: OUTPCALC%d%d returned %d bytes, expected %d", (j + 1) / 10, (j + 1) % 10, actual, array_bytes);
+                    printf("!Error: OUTPCALC%d%d returned %d bytes, expected %d", (j + 1) / 10, (j + 1) % 10, actual, array_bytes);
                     fflush(stdout);
                     return;
                 }
@@ -1250,14 +1258,14 @@ void getstate()
 
     if (actual != 2)
     {
-        printf("Error: OUTPLEAS header query returned %d bytes", actual);
+        printf("!Error: OUTPLEAS header query returned %d bytes", actual);
         fflush(stdout);
         return;
     }
 
     if ((data[0] != '#') || (data[1] != 'A'))
     {
-        printf("Error: OUTPLEAS FORM1 block header was 0x%.2X 0x%.2X", data[0], data[1]);
+        printf("!Error: OUTPLEAS FORM1 block header was 0x%.2X 0x%.2X", data[0], data[1]);
         fflush(stdout);
         return;
     }
@@ -1281,7 +1289,7 @@ void getstate()
 
     if (actual != 2)
     {
-        printf("Error: OUTPLEAS string len returned %d bytes", actual);
+        printf("!Error: OUTPLEAS string len returned %d bytes", actual);
         return;
     }
 
@@ -1301,7 +1309,7 @@ void getstate()
 
     if (learn_string_size != len)
     {
-        printf("Error: OUTPLEAS string len = %d, received %d", len, learn_string_size);
+        printf("!Error: OUTPLEAS string len = %d, received %d", len, learn_string_size);
         return;
     }
 
@@ -1509,14 +1517,7 @@ void factory_reset()
 
 void direct_command(action_type requested_action, const char *action_argument)
 {
-    // s string   - send string using gpib_puts()
-    // q query    - send string using gpib_query() and print result
-    // a          - read and print ascii response
-    // c          - read and print ascii response until next action
-    // d          - read and print ascii response N-times
-    // b          - read and print binary response
-    // ?          - print status
-    // .          - exit direct command mode
+    // see help below for list of recognized direct commands 
     uint8_t* data;
     int len, digits, i;
     char* response = 0;
@@ -1529,6 +1530,11 @@ void direct_command(action_type requested_action, const char *action_argument)
     }
 
     new_input_entered = 0;
+    long number_of_reads = 0;
+    SYSTEMTIME start_measure, stop_measure;
+    double measurement_total_time;
+    int16_t* buffer;
+    long buffer_item_size;
 
     switch (requested_action)
     {
@@ -1588,6 +1594,148 @@ void direct_command(action_type requested_action, const char *action_argument)
             }
             else Sleep(1);
         } 
+        break;
+    case action_cmd_continuous_16:
+      {
+        char select_channel[] = ":WAVEFORM:SOURCE CHANNEL?";
+        char channel_number = '1';
+        int channel_changed = 0;
+        while ((channel_number < '5') && (!ch_selected[channel_number - '1'])) channel_number++;
+        if (channel_number == '5')
+        {
+            printf("!no channel selected\n");
+            fflush(stdout);
+            break;
+        }
+        buffer = (int16_t*)malloc(MAXBUFFERSIZE);
+        if (buffer == 0)
+        {
+            printf("!not enough memory for buffer\n");
+            fflush(stdout);
+            break;
+        }
+        buffer_item_size = 0;
+        GetSystemTime(&start_measure);
+        
+        select_channel[24] = channel_number;
+        gpib_lock();
+        GPIB_puts(select_channel);
+        gpib_unlock();
+
+        do {
+            S32 actual_len;
+            
+            do {
+                channel_number++;
+                if (channel_number == '5') channel_number = '1';
+            } while (!ch_selected[channel_number - '1']);
+            if (select_channel[24] != channel_number)
+            {
+                select_channel[24] = channel_number;
+                channel_changed = 1;
+            }
+
+            gpib_lock();
+            GPIB_puts(":WAVEFORM:DATA?");
+            data = (uint8_t*)GPIB_read_BIN(-1, TRUE, FALSE, &actual_len);
+            if (channel_changed)
+                GPIB_puts(select_channel);
+            gpib_unlock();
+            if ((actual_len < 1) || (data[0] != '#'))
+            {
+                printf("!header not received\n");
+                fflush(stdout);
+                break;
+            }
+            digits = data[1] - '0';
+            if (actual_len < digits + 1)
+            {
+                printf("!header not received\n");
+                fflush(stdout);
+                break;
+            }
+
+            len = 0;
+            for (int i = 0; i < digits; i++)
+                len = len * 10 + data[i + 2] - '0';
+            //            printf("%d\n", len);
+
+            i = digits + 2;
+
+            if (actual_len < len + digits + 2)
+            {
+                printf("!not all data received\n");
+                fflush(stdout);
+                break;
+            }
+            if (buffer_item_size == 0) buffer_item_size = len;
+            else if (buffer_item_size != len)
+            {
+                printf("!packet lenghts differ\n");
+                fflush(stdout);
+                break;
+            }
+
+            memcpy(((uint8_t*)buffer) + buffer_item_size * number_of_reads,
+                data + digits + 2,
+                buffer_item_size);
+            number_of_reads++;
+            
+            gpib_lock();
+            GPIB_puts("*CLS");
+            int zt;
+            do {
+                C8* ztatuz = GPIB_query("*STB?");
+                sscanf(ztatuz, "%d", &zt);
+                //printf("S:%d\n", zt);
+            } while ((zt & 1) == 0);          
+            
+        } while ((aq_wp == aq_rp) &&
+            (buffer_item_size * (number_of_reads + 1) <= MAXBUFFERSIZE));
+        GetSystemTime(&stop_measure);
+        if (buffer_item_size * (number_of_reads + 1) > MAXBUFFERSIZE)
+            printf("!full\n");
+        printf("!number of reads: %ld\n", number_of_reads);
+        measurement_total_time = (stop_measure.wMinute - start_measure.wMinute) * 60L +
+            (stop_measure.wSecond - start_measure.wSecond) +
+            (stop_measure.wMilliseconds - start_measure.wMilliseconds) / 1000.0;
+
+        printf("!total time: %lf\n", measurement_total_time);
+        printf("!measurements per second: %lf\n", number_of_reads / measurement_total_time);
+
+        FILE* f;
+        if (save_file_name)
+            f = fopen(save_file_name, "w+");
+        else f = fopen("continuous_data.txt", "w+");
+        if (!f)
+        {
+            printf("!could not open outputfile");
+            break;
+        }
+        // write results to file...
+        for (int i = 0; i < number_of_reads; i++)
+        {
+            for (int j = 0; j < buffer_item_size / 2; j++)
+            {
+                uint16_t value16 = buffer[buffer_item_size * i / 2 + j];
+                int16_t svalue16 = (int16_t)((value16 >> 8) | ((value16 & 255) << 8));
+                fprintf(f, "%hd ", svalue16);
+            }
+            fprintf(f, "\n");
+        }
+        fclose(f);
+        free(buffer);    
+      }
+        break;
+    case action_cmd_select_channels:
+        log_session("selchan:", action_argument);
+        for (int ch = 0; ch < 4; ch++)
+            ch_selected[ch] = 0;
+        for (const char* p = action_argument; *p; p++)
+            if ((*p >= '1') && (*p <= '4')) ch_selected[*p - '1'] = 1;
+        printf("!selected channels: ");
+        for (int i = 0; i < 4; i++) if (ch_selected[i]) printf("%c", i + '1');
+        printf("\n");
         break;
     case action_cmd_read_8oscibin:
     case action_cmd_read_16oscibin:
@@ -1702,6 +1850,12 @@ void help()
     printf("             d n    ... continuous gpib_read_ASC() N-times\n");
     printf("             b      ... retrieve response with gpib_read_BIN()\n");
     printf("             ?      ... read and print status\n");
+    printf("             i      ... read any binary oscilloscope format, print in hex\n");
+    printf("             8      ... read BYTE format from oscilloscope and print\n");
+    printf("             16     ... read WORD format from oscilloscope and print\n");
+    printf("             *      ... continuous read WORD format from oscilloscope\n");
+    printf("                        result is saved to file configured with FILE\n");
+    printf("             1234   ... select channels to read from, specify 1-4 channels\n");
     printf("             .      ... leave direct command mode\n");
     printf("         HELP       ... print this help\n");
     printf("         LOGON      ... turn on session logging to log_session.txt\n");
@@ -1730,12 +1884,12 @@ void parse_cmdline(int argc, const char** argv)
         else if (_stricmp(argv[i], "-s22") == 0) cmdline_s22 = 1;
 }
 
-void set_file()
+void set_file(char *file_path)
 {
-    if (strlen(ln) < 6) return;
+    if (strlen(file_path) < 1) return;
     if (save_file_name) free(save_file_name);
-    save_file_name = (char*)malloc(strlen(ln + 5) + 1);
-    strcpy(save_file_name, ln + 5);
+    save_file_name = (char*)malloc(strlen(file_path) + 1);
+    strcpy(save_file_name, file_path);
 }
 
 void set_format(char* ln)
@@ -1786,7 +1940,7 @@ void perform_action(action_type action, char *action_argument)
     case action_form: set_sending_format(action_argument[0]); break;
     case action_fmt: set_format(action_argument); break;
     case action_freq: set_freq_format(action_argument); break;
-    case action_file: set_file(); break;
+    case action_file: set_file(action_argument); break;
     case action_sweep: sweep(); break;
     case action_autosweep: autosweep = 1; sweep(); break;
     case action_getstate: getstate(); break;
@@ -1800,9 +1954,11 @@ void perform_action(action_type action, char *action_argument)
     case action_cmd_continuous_asc:
     case action_cmd_repeated_asc:
     case action_cmd_read_bin:
+    case action_cmd_continuous_16:
     case action_cmd_read_oscibin:
     case action_cmd_read_8oscibin:
     case action_cmd_read_16oscibin:
+    case action_cmd_select_channels:
         direct_command(action, action_argument);
         break;
     case action_reset: reset(); break;
@@ -1839,13 +1995,13 @@ void enqueue_action(action_type action, char* action_argument)
     if (aq_wp == aq_rp) 
       if (!SetEvent(action_event))
       {
-          printf("SetEvent failed (%d)\n", GetLastError());
+          printf("!SetEvent failed (%d)\n", GetLastError());
           exit(1);
       }
     aq_wp = (aq_wp + 1) % ACTION_QUEUE_SIZE;
     if (aq_wp == aq_rp)
     {
-        printf("The capacity of action queue (%d) was exahusted\n", ACTION_QUEUE_SIZE);
+        printf("!The capacity of action queue (%d) was exahusted\n", ACTION_QUEUE_SIZE);
         exit(1);
     }
     ReleaseMutex(aq_lock);
@@ -1864,6 +2020,8 @@ void parse_end_enqueue_cmd_action(char* ln)
     else if (ln[0] == 'i') enqueue_action(action_cmd_read_oscibin, 0);
     else if (ln[0] == '8') enqueue_action(action_cmd_read_8oscibin, 0);
     else if ((ln[0] == '1') && (ln[1] == '6')) enqueue_action(action_cmd_read_16oscibin, 0);
+    else if (isdigit(ln[0])) enqueue_action(action_cmd_select_channels, ln);
+    else if (ln[0] == '*') enqueue_action(action_cmd_continuous_16, 0);
     else if (ln[0] == '?') enqueue_action(action_cmd_status, 0);
 }
 
@@ -1886,7 +2044,7 @@ void parse_end_enqueue_menu_action(char* ln)
     else if (_strnicmp(ln, "FORM", 4) == 0) enqueue_action(action_form, ln + 4);
     else if (_strnicmp(ln, "FMT", 3) == 0) enqueue_action(action_fmt, ln);
     else if (_strnicmp(ln, "FREQ", 4) == 0) enqueue_action(action_freq, ln);
-    else if (_strnicmp(ln, "FILE", 4) == 0) enqueue_action(action_file, ln);
+    else if (_strnicmp(ln, "FILE", 4) == 0) enqueue_action(action_file, ln + 5);
     else if (_stricmp(ln, "MEASURE") == 0) enqueue_action(action_sweep, 0);
     else if (_stricmp(ln, "M+") == 0) enqueue_action(action_autosweep, 0);
     else if (_stricmp(ln, "GETSTATE") == 0) enqueue_action(action_getstate, 0);
@@ -1911,6 +2069,7 @@ void parse_end_enqueue_menu_action(char* ln)
 DWORD WINAPI interactive_thread(LPVOID arg)
 {
     action = action_none;
+    for (int i = 0; i < 4; i++) ch_selected[i] = 0;
 
     do {
         while (current_input_mode == mode_input_blocked)
@@ -1959,7 +2118,7 @@ void create_event_and_thread()
 
     if (action_event == NULL)
     {
-        printf("CreateEvent failed (%d)\n", GetLastError());
+        printf("!CreateEvent failed (%d)\n", GetLastError());
         fflush(stdout);
         exit(1);
     }
@@ -1972,7 +2131,7 @@ void create_event_and_thread()
 
     if (aq_lock == NULL)
     {
-        printf("CreateMutex failed (%d)\n", GetLastError());
+        printf("!CreateMutex failed (%d)\n", GetLastError());
         fflush(stdout);
         exit(1);
     }
@@ -1984,7 +2143,7 @@ void create_event_and_thread()
 
     if (gpib_lock == NULL)
     {
-        printf("CreateMutex error: %d\n", GetLastError());
+        printf("!CreateMutex error: %d\n", GetLastError());
         fflush(stdout);
         exit(1);
     }
@@ -1999,7 +2158,7 @@ void create_event_and_thread()
 
     if (t == NULL)
     {
-        printf("CreateThread failed (%d)\n", GetLastError());
+        printf("!CreateThread failed (%d)\n", GetLastError());
         fflush(stdout);
         exit(1);
     }
@@ -2012,7 +2171,7 @@ void main_action_loop()
         DWORD dwWaitResult = WaitForSingleObject(aq_lock, INFINITE);
         if (dwWaitResult != WAIT_OBJECT_0) 
         {
-            printf("Wait error (%d)\n", GetLastError());
+            printf("!Wait error (%d)\n", GetLastError());
             fflush(stdout);
             exit(1);
         }
@@ -2026,14 +2185,14 @@ void main_action_loop()
 
             if (event != WAIT_OBJECT_0)
             {
-                printf("Wait error (%d)\n", GetLastError());
+                printf("!Wait error (%d)\n", GetLastError());
                 fflush(stdout);
                 exit(1);
             }
             DWORD dwWaitResult = WaitForSingleObject(aq_lock, INFINITE);
             if (dwWaitResult != WAIT_OBJECT_0)
             {
-                printf("Wait error (%d)\n", GetLastError());
+                printf("!Wait error (%d)\n", GetLastError());
                 fflush(stdout);
                 exit(1);
             }
@@ -2063,8 +2222,8 @@ const char* test2argv[] = { "hpctrl", "-a", "19", "-i" };
 int test1argc = 7;
 int test2argc = 4;
 
-//int runtest = 2;
-int runtest = 0;
+int runtest = 2;
+//int runtest = 0;
 
 int main(int argc, char** argv)
 {

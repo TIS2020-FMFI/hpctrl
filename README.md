@@ -8,10 +8,12 @@ It was developed for research work at Faculty of Mathematics, Physics and Inform
 in particular as a support for student projects:  
   https://github.com/TIS2020-FMFI/plazma  (HP8753)  
   https://github.com/TIS2020-FMFI/hp (HP4191A)  
+  https://github.com/TIS2021-FMFI/osciloskop (HP83480A)
 
 It compiles with MSVS 2019 Community version. We use Win32 Debug mode.  
 
-For HP4191A, only the "cmd" mode in interactive mode is useful.  
+For HP4191A, only the "cmd" mode in interactive mode is useful. 
+Commands i,8,16,*,1234 are useful only for HP83480A. 
 Bugs, comments, ideas: Pavel Petrovic, pavel.petrovic at gmail.com.  
 
 Run debug/hpctrl.exe to see the usage:  
@@ -51,6 +53,12 @@ usage: hpctrl [-a n] [-i | [-S11][-S21][-S12][-S22]]
              d n    ... continuous gpib_read_ASC() N-times
              b      ... retrieve response with gpib_read_BIN()
              ?      ... read and print status
+             i      ... read any binary oscilloscope format, print in hex\n");
+             8      ... read BYTE format from oscilloscope and print\n");
+             16     ... read WORD format from oscilloscope and print\n");
+             *      ... continuous read WORD format from oscilloscope\n");
+                        result is saved to file configured with FILE\n");
+             1234   ... select channels to read from, specify 1-4 channels\n");			 
              .      ... leave direct command mode
          HELP       ... print this help
          LOGON      ... turn on session logging to log_session.txt
