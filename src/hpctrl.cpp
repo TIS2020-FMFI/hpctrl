@@ -12,7 +12,7 @@
 #include <malloc.h>
 #include <float.h>
 #include <math.h>
-#include <windows.h>
+#include <Windows.h>
 
 #include "gpiblib.h"
 #include <cassert>
@@ -22,6 +22,7 @@
 #define ACTION_QUEUE_SIZE 256
 
 #define MAXBUFFERSIZE 1000000000  // 1GB buffer for continuous read
+#define MAXPREAMBLEBUFFERSIZE 256000000
 #define MAX_OSCI_POINTS 4096
 
 int session_logging = 0;
@@ -39,6 +40,7 @@ void log_session(const char* a, const char* b)
         if ((*logmsg == '\n') || (*logmsg == '\r'))
         {
             char* logm = (char*)malloc(strlen(b) + 1);
+            if (logm == 0) { fprintf(f, "out of memory\n"); fclose(f); return; }
             strcpy(logm, b);
             logmsg = logm;
             logm += strlen(logm) - 1;
@@ -82,6 +84,8 @@ static int ch_selected[4];
 
 static char ln[52];
 
+static int16_t* buffer;
+static uint8_t* preamble_buffer = 0;
 
 enum action_type {
     action_none, action_connect, action_disconnect, action_sweep, action_getstate, action_setstate,
@@ -89,7 +93,7 @@ enum action_type {
     action_cmd_continuous_asc, action_cmd_cancel_continuous_asc, action_cmd_repeated_asc, action_cmd_read_bin, action_exit, action_reset, action_freset,
     action_s11, action_s12, action_s21, action_s22, action_all, action_clear, action_form, action_fmt, action_freq,
     action_file, action_autosweep, action_osci, action_cmd_read_oscibin, action_cmd_read_8oscibin, action_cmd_read_16oscibin, action_cmd_continuous_16,
-    action_cmd_select_channels
+    action_cmd_select_channels, action_cmd_preamble_on, action_cmd_preamble_off
 };
 
 static action_type action_queue[ACTION_QUEUE_SIZE];
@@ -99,7 +103,7 @@ static HANDLE aq_lock;
 
 static volatile action_type action;
 static int cmd_read_repeat_count;
-static int configured_delay = 120;
+static int send_preamble = 1;
 
 HANDLE action_event;
 
@@ -556,6 +560,18 @@ int connect()
     GPIB_set_serial_read_dropout(10000);
     if (!osci)
         instrument_setup();
+    else if (buffer == 0)
+    {        
+        buffer = (int16_t*)malloc(MAXBUFFERSIZE);
+        preamble_buffer = (uint8_t*)malloc(MAXPREAMBLEBUFFERSIZE);
+
+        if ((buffer == 0) || (preamble_buffer == 0))
+        {
+            printf("!not enough memory for buffer\n");
+            fflush(stdout);
+            return 0;
+        }
+    }
 
     connected = 1;
     return 1;
@@ -1515,6 +1531,9 @@ void factory_reset()
     }
 }
 
+int16_t preamble_sizes[256000];
+uint64_t measurement_times[256000];
+
 void direct_command(action_type requested_action, const char *action_argument)
 {
     // see help below for list of recognized direct commands 
@@ -1533,7 +1552,8 @@ void direct_command(action_type requested_action, const char *action_argument)
     long number_of_reads = 0;
     SYSTEMTIME start_measure, stop_measure;
     double measurement_total_time;
-    int16_t* buffer;
+    uint8_t* pbptr;
+    int pbcnt = 0;
     long buffer_item_size;
 
     switch (requested_action)
@@ -1597,6 +1617,7 @@ void direct_command(action_type requested_action, const char *action_argument)
         break;
     case action_cmd_continuous_16:
       {
+        if (!osci) { printf("!only in osci mode\n"); fflush(stdout); break; }
         char select_channel[] = ":WAVEFORM:SOURCE CHANNEL?";
         char channel_number = '1';
         int channel_changed = 0;
@@ -1606,14 +1627,11 @@ void direct_command(action_type requested_action, const char *action_argument)
             printf("!no channel selected\n");
             fflush(stdout);
             break;
-        }
-        buffer = (int16_t*)malloc(MAXBUFFERSIZE);
-        if (buffer == 0)
-        {
-            printf("!not enough memory for buffer\n");
-            fflush(stdout);
-            break;
-        }
+        }       
+        
+        pbptr = preamble_buffer;
+        pbcnt = 0;
+        
         buffer_item_size = 0;
         GetSystemTime(&start_measure);
         
@@ -1621,6 +1639,12 @@ void direct_command(action_type requested_action, const char *action_argument)
         gpib_lock();
         GPIB_puts(select_channel);
         gpib_unlock();
+
+        LARGE_INTEGER now;
+        LARGE_INTEGER counter_freq;
+        QueryPerformanceFrequency(&counter_freq);
+        QueryPerformanceCounter(&now);
+        uint64_t start_measurement_time = (now.QuadPart * 1000000UL / counter_freq.QuadPart);
 
         do {
             S32 actual_len;
@@ -1688,10 +1712,28 @@ void direct_command(action_type requested_action, const char *action_argument)
                 C8* ztatuz = GPIB_query("*STB?");
                 sscanf(ztatuz, "%d", &zt);
                 //printf("S:%d\n", zt);
-            } while ((zt & 1) == 0);          
+            } while ((zt & 1) == 0); 
+            
+            LARGE_INTEGER now;
+            QueryPerformanceCounter(&now);
+            uint64_t current_measurement_time = (now.QuadPart * 1000000UL / counter_freq.QuadPart);
+            measurement_times[pbcnt] = current_measurement_time - start_measurement_time;
+            
+            if (send_preamble)
+            {
+                C8* preamble = GPIB_query(":WAVEFORM:PREAMBLE?");
+                strcpy((char*)pbptr, preamble);
+                int pr_len = strlen(preamble);
+                preamble_sizes[pbcnt] = pr_len;
+                pbptr += pr_len;
+            }
+            pbcnt++;
+            
+            gpib_unlock();
             
         } while ((aq_wp == aq_rp) &&
-            (buffer_item_size * (number_of_reads + 1) <= MAXBUFFERSIZE));
+            (buffer_item_size * (number_of_reads + 1) <= MAXBUFFERSIZE) &&
+            (pbptr < preamble_buffer + MAXPREAMBLEBUFFERSIZE - 1000));
         GetSystemTime(&stop_measure);
         if (buffer_item_size * (number_of_reads + 1) > MAXBUFFERSIZE)
             printf("!full\n");
@@ -1713,21 +1755,34 @@ void direct_command(action_type requested_action, const char *action_argument)
             break;
         }
         // write results to file...
+        pbptr = preamble_buffer;
         for (int i = 0; i < number_of_reads; i++)
         {
+            if (send_preamble)
+            {
+                char pbformat[10];
+                sprintf(pbformat, "%%.%ds", preamble_sizes[i]);
+                fprintf(f, pbformat, pbptr);
+                pbptr += preamble_sizes[i];
+            }
+            fprintf(f, "%" PRId64 " ", measurement_times[i]);
+
             for (int j = 0; j < buffer_item_size / 2; j++)
             {
                 uint16_t value16 = buffer[buffer_item_size * i / 2 + j];
                 int16_t svalue16 = (int16_t)((value16 >> 8) | ((value16 & 255) << 8));
-                fprintf(f, "%hd ", svalue16);
+                fprintf(f, "%hd", svalue16);
+                if (j < buffer_item_size / 2 - 1) fprintf(f, " ");
             }
             fprintf(f, "\n");
         }
         fclose(f);
-        free(buffer);    
       }
         break;
+    case action_cmd_preamble_on: send_preamble = 1; break;
+    case action_cmd_preamble_off: send_preamble = 0; break;
     case action_cmd_select_channels:
+        if (!osci) { printf("!only in osci mode\n"); fflush(stdout); break; }
         log_session("selchan:", action_argument);
         for (int ch = 0; ch < 4; ch++)
             ch_selected[ch] = 0;
@@ -1740,6 +1795,7 @@ void direct_command(action_type requested_action, const char *action_argument)
     case action_cmd_read_8oscibin:
     case action_cmd_read_16oscibin:
     case action_cmd_read_oscibin:
+        if (!osci) { printf("!only in osci mode\n"); fflush(stdout); break; }
         gpib_lock();
         data = (uint8_t*)GPIB_read_BIN();
         gpib_unlock();
@@ -1856,6 +1912,8 @@ void help()
     printf("             *      ... continuous read WORD format from oscilloscope\n");
     printf("                        result is saved to file configured with FILE\n");
     printf("             1234   ... select channels to read from, specify 1-4 channels\n");
+    printf("             pon    ... send preamble before each measurement in * cmd\n");
+    printf("             poff   ... do send preamble before measurements in * cmd\n");
     printf("             .      ... leave direct command mode\n");
     printf("         HELP       ... print this help\n");
     printf("         LOGON      ... turn on session logging to log_session.txt\n");
@@ -1959,6 +2017,8 @@ void perform_action(action_type action, char *action_argument)
     case action_cmd_read_8oscibin:
     case action_cmd_read_16oscibin:
     case action_cmd_select_channels:
+    case action_cmd_preamble_on:
+    case action_cmd_preamble_off:
         direct_command(action, action_argument);
         break;
     case action_reset: reset(); break;
@@ -2016,12 +2076,14 @@ void parse_end_enqueue_cmd_action(char* ln)
     else if (ln[0] == 'c') enqueue_action(action_cmd_continuous_asc, ln + 2);
     else if (ln[0] == 'n') enqueue_action(action_cmd_cancel_continuous_asc, ln + 2);
     else if (ln[0] == 'd') enqueue_action(action_cmd_repeated_asc, ln + 2);
-    else if (ln[0] == 'b') enqueue_action(action_cmd_read_bin, 0); 
+    else if (ln[0] == 'b') enqueue_action(action_cmd_read_bin, 0);
     else if (ln[0] == 'i') enqueue_action(action_cmd_read_oscibin, 0);
     else if (ln[0] == '8') enqueue_action(action_cmd_read_8oscibin, 0);
     else if ((ln[0] == '1') && (ln[1] == '6')) enqueue_action(action_cmd_read_16oscibin, 0);
     else if (isdigit(ln[0])) enqueue_action(action_cmd_select_channels, ln);
     else if (ln[0] == '*') enqueue_action(action_cmd_continuous_16, 0);
+    else if (strncmp(ln, "pon", 3) == 0) enqueue_action(action_cmd_preamble_on, 0);
+    else if (strncmp(ln, "poff", 4) == 0) enqueue_action(action_cmd_preamble_off, 0);
     else if (ln[0] == '?') enqueue_action(action_cmd_status, 0);
 }
 
@@ -2222,8 +2284,8 @@ const char* test2argv[] = { "hpctrl", "-a", "19", "-i" };
 int test1argc = 7;
 int test2argc = 4;
 
-int runtest = 2;
-//int runtest = 0;
+//int runtest = 2;
+int runtest = 0;
 
 int main(int argc, char** argv)
 {
