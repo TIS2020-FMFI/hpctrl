@@ -1662,6 +1662,22 @@ void direct_command(action_type requested_action, const char *action_argument)
             gpib_lock();
             GPIB_puts(":WAVEFORM:DATA?");
             data = (uint8_t*)GPIB_read_BIN(-1, TRUE, FALSE, &actual_len);
+
+            LARGE_INTEGER now;
+            QueryPerformanceCounter(&now);
+            uint64_t current_measurement_time = (now.QuadPart * 1000000UL / counter_freq.QuadPart);
+            measurement_times[pbcnt] = current_measurement_time - start_measurement_time;
+
+            if (send_preamble)
+            {
+                C8* preamble = GPIB_query(":WAVEFORM:PREAMBLE?");
+                strcpy((char*)pbptr, preamble);
+                int pr_len = strlen(preamble);
+                preamble_sizes[pbcnt] = pr_len;
+                pbptr += pr_len;
+            }
+            pbcnt++;
+
             if (channel_changed)
                 GPIB_puts(select_channel);
             gpib_unlock();
@@ -1713,22 +1729,7 @@ void direct_command(action_type requested_action, const char *action_argument)
                 sscanf(ztatuz, "%d", &zt);
                 //printf("S:%d\n", zt);
             } while ((zt & 1) == 0); 
-            
-            LARGE_INTEGER now;
-            QueryPerformanceCounter(&now);
-            uint64_t current_measurement_time = (now.QuadPart * 1000000UL / counter_freq.QuadPart);
-            measurement_times[pbcnt] = current_measurement_time - start_measurement_time;
-            
-            if (send_preamble)
-            {
-                C8* preamble = GPIB_query(":WAVEFORM:PREAMBLE?");
-                strcpy((char*)pbptr, preamble);
-                int pr_len = strlen(preamble);
-                preamble_sizes[pbcnt] = pr_len;
-                pbptr += pr_len;
-            }
-            pbcnt++;
-            
+                        
             gpib_unlock();
             
         } while ((aq_wp == aq_rp) &&
