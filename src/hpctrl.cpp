@@ -21,8 +21,7 @@
 
 #define ACTION_QUEUE_SIZE 256
 
-#define MAXBUFFERSIZE 1000000000  // 1GB buffer for continuous read
-#define MAXPREAMBLEBUFFERSIZE 256000000
+
 #define MAX_OSCI_POINTS 4096
 
 int session_logging = 0;
@@ -54,6 +53,10 @@ void log_session(const char* a, const char* b)
     }
 }
 
+static long MAXBUFFERSIZE = 1000000000L;  // 1GB buffer for continuous read
+static long MAXPREAMBLEBUFFERSIZE = 256000000L;
+static long MAXNUMBEROFMEASUREMENTS = 256000;
+
 static int cmdline_i = 0;
 static int cmdline_a = 16;
 static int cmdline_s11 = 0;
@@ -84,8 +87,10 @@ static int ch_selected[4];
 
 static char ln[52];
 
-static int16_t* buffer;
-static uint8_t* preamble_buffer = 0;
+static int16_t *buffer;
+static uint8_t *preamble_buffer = 0;
+static int16_t *preamble_sizes;
+static uint64_t *measurement_times;
 
 enum action_type {
     action_none, action_connect, action_disconnect, action_sweep, action_getstate, action_setstate,
@@ -564,8 +569,10 @@ int connect()
     {        
         buffer = (int16_t*)malloc(MAXBUFFERSIZE);
         preamble_buffer = (uint8_t*)malloc(MAXPREAMBLEBUFFERSIZE);
+        preamble_sizes = (int16_t*)malloc(sizeof(int16_t) * MAXNUMBEROFMEASUREMENTS);  
+        measurement_times = (uint64_t*)malloc(sizeof(uint64_t) * MAXNUMBEROFMEASUREMENTS);
 
-        if ((buffer == 0) || (preamble_buffer == 0))
+        if ((buffer == 0) || (preamble_buffer == 0) || (preamble_sizes == 0) || (measurement_times == 0))
         {
             printf("!not enough memory for buffer\n");
             fflush(stdout);
@@ -896,9 +903,14 @@ int sweep()
 
 void disconnect()
 {
+    if (!connected) return;
     Sleep(500);
     GPIB_disconnect();
     connected = 0;
+    free(buffer);
+    free(preamble_buffer);
+    free(preamble_sizes);
+    free(measurement_times);    
 }
 
 void getcalib()
@@ -1531,8 +1543,7 @@ void factory_reset()
     }
 }
 
-int16_t preamble_sizes[256000];
-uint64_t measurement_times[256000];
+
 
 void direct_command(action_type requested_action, const char *action_argument)
 {
@@ -1733,10 +1744,13 @@ void direct_command(action_type requested_action, const char *action_argument)
             gpib_unlock();
             
         } while ((aq_wp == aq_rp) &&
+            (pbcnt < MAXNUMBEROFMEASUREMENTS) &&
             (buffer_item_size * (number_of_reads + 1) <= MAXBUFFERSIZE) &&
             (pbptr < preamble_buffer + MAXPREAMBLEBUFFERSIZE - 1000));
         GetSystemTime(&stop_measure);
-        if (buffer_item_size * (number_of_reads + 1) > MAXBUFFERSIZE)
+        if ((buffer_item_size * (number_of_reads + 1) > MAXBUFFERSIZE) ||
+            (pbcnt >= MAXNUMBEROFMEASUREMENTS) ||
+            (pbptr >= preamble_buffer + MAXPREAMBLEBUFFERSIZE - 1000))
             printf("!full\n");
         printf("!number of reads: %ld\n", number_of_reads);
         measurement_total_time = (stop_measure.wMinute - start_measure.wMinute) * 60L +
@@ -1778,6 +1792,7 @@ void direct_command(action_type requested_action, const char *action_argument)
             fprintf(f, "\n");
         }
         fclose(f);
+        printf("!file written\n");
       }
         break;
     case action_cmd_preamble_on: send_preamble = 1; break;
@@ -2279,6 +2294,47 @@ void interactive()
     CloseHandle(gpib_mutex);
 }
 
+void load_config()
+{
+    char cfgline[202];
+    FILE* f = fopen("hpctrl.cfg", "r");
+    if (!f)
+    {
+        printf("!info: hpctrl.cfg not found, using defaults\n");
+        return;
+    }
+
+    while (fgets(cfgline, 200, f))
+    {
+        int ln = strlen(cfgline);
+        if (cfgline[0] == '#') continue;
+        while (ln && ((cfgline[ln - 1] == '\n') || (cfgline[ln - 1] == '\r'))) ln--;
+        if (ln == 0) continue;
+        char* space = strchr(cfgline, ' ');
+        if (space == 0)
+        {
+            printf("!warn: ignoring unrecognized line in hpctrl.cfg: '%s'\n", cfgline);
+            continue;
+        }
+        if (strncmp(cfgline, "MAXBUFFERSIZE", 13) == 0)
+        {
+            sscanf(space + 1, "%ld", &MAXBUFFERSIZE);
+            printf("!MAXBUFFERSIZE=%ld\n", MAXBUFFERSIZE);
+        }
+        else if (strncmp(cfgline, "MAXPREAMBLEBUFFERSIZE", 21) == 0)
+        {
+            sscanf(space + 1, "%ld", &MAXPREAMBLEBUFFERSIZE);
+            printf("!MAXPREAMBLEBUFFERSIZE=%ld\n", MAXPREAMBLEBUFFERSIZE);
+        }
+        else if (strncmp(cfgline, "MAXNUMBEROFMEASUREMENTS", 23) == 0)
+        {
+            sscanf(space + 1, "%ld", &MAXNUMBEROFMEASUREMENTS);
+            printf("!MAXNUMBEROFMEASUREMENTS=%ld\n", MAXNUMBEROFMEASUREMENTS);
+        }
+    }
+    fclose(f);
+}
+
 const char* test1argv[] = { "hpctrl", "-a", "16", "-s11", "-s12", "-s21", "-s22" };
 const char* test2argv[] = { "hpctrl", "-a", "19", "-i" };
 
@@ -2308,6 +2364,7 @@ int main(int argc, char** argv)
     else
     {
         parse_cmdline(argc, av);
+        load_config();
         if (cmdline_i) interactive();
         else measure();
     }
