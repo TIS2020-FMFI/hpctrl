@@ -131,7 +131,10 @@ void gpib_lock()
 void gpib_unlock()
 {
     if (!ReleaseMutex(gpib_mutex))
+    {
         printf("!error releasing mutex: %d\n", GetLastError());
+        fflush(stdout);
+    }
 }
 
 int gpib_trylock()
@@ -410,6 +413,7 @@ bool read_complex_trace(const C8* param,
         if (result & mask)
         {
             printf("! %s sweep finished in %d ms\n", param, timeGetTime() - st);
+            fflush(stdout);
             break;
         }
     }
@@ -461,6 +465,7 @@ bool read_complex_trace(const C8* param,
             if ((I == DBL_MIN) || (Q == DBL_MIN))
             {
                 printf("!Error VNA read timed out reading %s (point %d of %d points)", param, i, cnt);
+                fflush(stdout);
                 return FALSE;
             }
 
@@ -481,6 +486,7 @@ bool read_complex_trace(const C8* param,
         if (actual != 2)
         {
             printf("!Error: data header query returned %d bytes", actual);
+            fflush(stdout);
             return 0;
         }
         log_session("b:", "...");
@@ -488,6 +494,7 @@ bool read_complex_trace(const C8* param,
         if ((data[0] != '#') || (data[1] != 'A'))
         {
             printf("!Error: data FORM1 block header was 0x%.2X 0x%.2X", data[0], data[1]);
+            fflush(stdout);
             return 0;
         }
 
@@ -505,6 +512,7 @@ bool read_complex_trace(const C8* param,
         if (actual != 2)
         {
             printf("!Error: data len returned %d bytes", actual);
+            fflush(stdout);
             return 0;
         }
         log_session("b:", "...");
@@ -520,12 +528,14 @@ bool read_complex_trace(const C8* param,
         if (actual != len)
         {
             printf("!Error: data len = %d, received %d", len, actual);
+            fflush(stdout);
             return 0;
         }
 
         if (len != cnt * 6)
         {
             printf("!Error: data cnt = %d, cnt*6 = %d, but len = %d", cnt, cnt * 6, len);
+            fflush(stdout);
             return 0;
         }
         log_session("b:", "...");
@@ -665,6 +675,7 @@ int sweep()
     if (!connected)
     {
         printf("!not connected\n");
+        fflush(stdout);
         return 0;
     }
     log_session("q>", "FORM4;STAR;OUTPACTI;");
@@ -694,6 +705,7 @@ int sweep()
     {
         GPIB_disconnect();
         printf("!Error n_points = %d\n", n);
+        fflush(stdout);
         return 0;
     }
 
@@ -779,6 +791,7 @@ int sweep()
             {
                 printf("!Error, VNA read timed out reading OUTPLIML (point %d of %d points)", i, n_AC_points);
                 GPIB_disconnect();
+                fflush(stdout);
                 return 0;
             }
 
@@ -855,7 +868,10 @@ int sweep()
                 else real_file_name = save_file_name;
                 sf = fopen(real_file_name, "w+");
                 if (!sf)
+                {
                     printf("!could not open file %s for writing\n", real_file_name);
+                    fflush(stdout);
+                }
                 else
                 {
                     save_file(sf, real_file_name);
@@ -992,6 +1008,7 @@ void getcalib()
             if ((trace_points < 1) || (trace_points > 1000000))
             {
                 printf("!Error: trace_points = %d\n", trace_points);
+                fflush(stdout);
                 return;
             }
 
@@ -1023,6 +1040,7 @@ void getcalib()
                 if ((data[0] != '#') || (data[1] != 'A'))
                 {
                     printf("!Error: OUTPCALC FORM1 block header was 0x%.2X 0x%.2X", data[0], data[1]);
+                    fflush(stdout); 
                     return;
                 }
 
@@ -1037,6 +1055,7 @@ void getcalib()
                 if (len != array_bytes)
                 {
                     printf("!Error: OUTPCALC returned %d bytes, expected %d", len, array_bytes);
+                    fflush(stdout); 
                     return;
                 }
                 log_session("b:", "...");
@@ -1056,6 +1075,7 @@ void getcalib()
                 if (actual != array_bytes)
                 {
                     printf("!Error: OUTPCALC%d%d returned %d bytes, expected %d", (j + 1) / 10, (j + 1) % 10, actual, array_bytes);
+                    fflush(stdout); 
                     return;
                 }
 
@@ -1071,6 +1091,7 @@ void getcalib()
             assert(n == total_bytes);
 
             printf("SAVC; CALS%d; CORROFF;", active_cal_set);
+            fflush(stdout);
 
             //
             // Write second copy of learn string command to file
@@ -1187,6 +1208,7 @@ void getcalib()
                 if ((data[0] != '#') || (data[1] != 'A'))
                 {
                     printf("!Error: OUTPCALC FORM1 block header was 0x%.2X 0x%.2X", data[0], data[1]);
+                    fflush(stdout); 
                     return;
                 }
 
@@ -1318,6 +1340,7 @@ void getstate()
     if (actual != 2)
     {
         printf("!Error: OUTPLEAS string len returned %d bytes", actual);
+        fflush(stdout); 
         return;
     }
 
@@ -1338,6 +1361,7 @@ void getstate()
     if (learn_string_size != len)
     {
         printf("!Error: OUTPLEAS string len = %d, received %d", len, learn_string_size);
+        fflush(stdout); 
         return;
     }
 
@@ -1767,6 +1791,7 @@ void direct_command(action_type requested_action, const char *action_argument)
         if (!f)
         {
             printf("!could not open outputfile");
+            fflush(stdout);
             break;
         }
         // write results to file...
@@ -1793,6 +1818,7 @@ void direct_command(action_type requested_action, const char *action_argument)
         }
         fclose(f);
         printf("!file written\n");
+        fflush(stdout);
       }
         break;
     case action_cmd_preamble_on: send_preamble = 1; break;
@@ -1807,6 +1833,7 @@ void direct_command(action_type requested_action, const char *action_argument)
         printf("!selected channels: ");
         for (int i = 0; i < 4; i++) if (ch_selected[i]) printf("%c", i + '1');
         printf("\n");
+        fflush(stdout);
         break;
     case action_cmd_read_8oscibin:
     case action_cmd_read_16oscibin:
@@ -2072,12 +2099,14 @@ void enqueue_action(action_type action, char* action_argument)
       if (!SetEvent(action_event))
       {
           printf("!SetEvent failed (%d)\n", GetLastError());
+          fflush(stdout);
           exit(1);
       }
     aq_wp = (aq_wp + 1) % ACTION_QUEUE_SIZE;
     if (aq_wp == aq_rp)
     {
         printf("!The capacity of action queue (%d) was exahusted\n", ACTION_QUEUE_SIZE);
+        fflush(stdout);
         exit(1);
     }
     ReleaseMutex(aq_lock);
@@ -2301,6 +2330,7 @@ void load_config()
     if (!f)
     {
         printf("!info: hpctrl.cfg not found, using defaults\n");
+        fflush(stdout);
         return;
     }
 
@@ -2314,6 +2344,7 @@ void load_config()
         if (space == 0)
         {
             printf("!warn: ignoring unrecognized line in hpctrl.cfg: '%s'\n", cfgline);
+            fflush(stdout);
             continue;
         }
         if (strncmp(cfgline, "MAXBUFFERSIZE", 13) == 0)
@@ -2332,6 +2363,7 @@ void load_config()
             printf("!MAXNUMBEROFMEASUREMENTS=%ld\n", MAXNUMBEROFMEASUREMENTS);
         }
     }
+    fflush(stdout);
     fclose(f);
 }
 
